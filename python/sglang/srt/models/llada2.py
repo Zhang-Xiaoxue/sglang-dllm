@@ -369,6 +369,20 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
 
         return router_output, shared_output
 
+    def forward_normal_dual_stream_npu(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        current_stream = torch.npu.current_stream()
+        self.alt_stream.wait_stream(current_stream)
+        shared_output = self._forward_shared_experts(hidden_states.clone())
+
+        with torch.npu.stream(self.alt_stream):
+            router_output = self._forward_router_experts(hidden_states)
+        current_stream.wait_stream(self.alt_stream)
+
+        return router_output, shared_output
+
     def forward_normal(
         self,
         hidden_states: torch.Tensor,
@@ -382,9 +396,14 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
             and hidden_states.shape[0] > 0
             and get_is_capture_mode()
         ):
-            final_hidden_states, shared_output = self.forward_normal_dual_stream(
-                hidden_states
-            )
+            if _is_npu:
+                final_hidden_states, shared_output = (
+                    self.forward_normal_dual_stream_npu(hidden_states)
+                )
+            else:
+                final_hidden_states, shared_output = self.forward_normal_dual_stream(
+                    hidden_states
+                )
         else:
             shared_output = self._forward_shared_experts(hidden_states)
             final_hidden_states = self._forward_router_experts(hidden_states)
@@ -811,7 +830,13 @@ class LLaDA2MoeModelLM(nn.Module):
         self.pp_group = get_pp_group()
         self.config = config
         self.quant_config = quant_config
-        alt_stream = torch.cuda.Stream() if _is_cuda else None
+
+        if _is_cuda:
+            alt_stream = torch.cuda.Stream()
+        elif _is_npu:
+            alt_stream = torch.npu.Stream()
+        else:
+            alt_stream = None
 
         self.model = LLaDA2MoeModel(
             config,
