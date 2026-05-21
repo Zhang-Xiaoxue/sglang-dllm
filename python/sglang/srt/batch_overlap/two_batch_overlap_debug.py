@@ -74,7 +74,6 @@ def get_token_num_per_seq(
         return None
 
 
-
 # TODO: may smartly disable TBO when batch size is too small b/c it will slow down
 def compute_split_seq_index(
     forward_mode: ForwardMode,
@@ -82,31 +81,16 @@ def compute_split_seq_index(
     extend_lens: Optional[Sequence[int]],
     token_num_per_seq: Optional[int],
 ) -> Optional[int]:
-    # 保险一点，兼容传进来是 int 的情况
-    if not isinstance(forward_mode, ForwardMode):
-        forward_mode = ForwardMode(forward_mode)
-
-    # JointThreshold / dLLM 走到 DLLM_EXTEND
-    if forward_mode == ForwardMode.EXTEND or forward_mode.is_dllm_extend():
+    if forward_mode == ForwardMode.EXTEND:
         assert extend_lens is not None
         return _split_extend_seqs(extend_lens)
-
     elif forward_mode.is_target_verify() or forward_mode.is_decode():
         assert token_num_per_seq is not None
         return (num_tokens // token_num_per_seq) // 2
-
     elif forward_mode.is_idle() or forward_mode.is_prebuilt():
         assert num_tokens == 0
         return 0
-
     else:
-        # print(
-        #     f"[DEBUG tbo] unsupported forward_mode={forward_mode}, "
-        #     f"num_tokens={num_tokens}, "
-        #     f"token_num_per_seq={token_num_per_seq}, "
-        #     f"extend_lens={extend_lens}",
-        #     flush=True,
-        # )
         raise NotImplementedError()
 
 

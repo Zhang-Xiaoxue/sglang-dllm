@@ -11,6 +11,7 @@ from sglang.srt.compilation.cuda_piecewise_backend import (
     CUDAPiecewiseBackend,
     weak_ref_tensors,
 )
+from sglang.srt.compilation.piecewise_context_manager import get_pcg_capture_stream
 
 
 class NPUPiecewiseBackend(CUDAPiecewiseBackend):
@@ -73,7 +74,16 @@ class NPUPiecewiseBackend(CUDAPiecewiseBackend):
                     stack.enter_context(patch("torch.npu.empty_cache", lambda: None))
 
                 # mind-exploding: carefully manage the reference and memory.
-                with torch.npu.graph(npugraph, pool=self.graph_pool):
+                stream = get_pcg_capture_stream()
+                assert (
+                    stream is not None
+                ), "PCG capture stream is not set, please check if runtime recompilation happened"
+                with torch.npu.graph(
+                    npugraph,
+                    pool=self.graph_pool,
+                    stream=stream,
+                    auto_dispatch_capture=True,
+                ):
                     # `output` is managed by pytorch's cudagraph pool
                     output = entry.runnable(*args)
                     if self.is_last_graph:

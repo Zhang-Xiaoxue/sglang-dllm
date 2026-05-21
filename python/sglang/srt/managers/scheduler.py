@@ -1262,36 +1262,49 @@ class Scheduler(
 
             # Launch the current batch
             if batch:
-                profiling = batch.seq_lens.item() in (128, 960)
-                # profiling = False
+                
+                profiling = True
+                # print(batch.seq_lens)
+                # if batch.seq_lens.item() == 256 or batch.seq_lens.item() == 896:
+                #     profiling = True
+                #    #profiling = False
 
-                if profiling:
-                    experimental_config = torch_npu.profiler._ExperimentalConfig(
-                        profiler_level=torch_npu.profiler.ProfilerLevel.Level2
-                    )
+                mode = getattr(batch, "_original_forward_mode", batch.forward_mode)
+                # print(f'mode - extend : {mode.is_extend()}, decode : {mode.is_decode()}, mixed: {mode.is_mixed()}')
 
+                do_profile_prefill = profiling and mode.is_extend() and (not mode.is_mixed()) and batch.seq_lens.item() == 256 # and (not self.has_profiled_prefill)
+                do_profile_decode  = profiling and mode.is_decode() # and (not self.has_profiled_decode)
+
+                if do_profile_prefill or do_profile_decode:
+                    tag = "prefill" if do_profile_prefill else "decode"
+                    max_len = int(batch.seq_lens.max().item()) if batch.seq_lens is not None else -1
+                    ext_tokens = int(batch.extend_num_tokens) if getattr(batch, "extend_num_tokens", None) is not None else -1
+
+                    out_dir = f"/home/ma-user/work/z84301856/sglang-dllm/bashs/LLaDA2.1-mini-910B/none_tp4ep4bs32/{tag}_maxlen{max_len}_extTok{ext_tokens}"                      
+                    
                     with torch_npu.profiler.profile(
                         activities=[
-                            torch_npu.profiler.ProfilerActivity.CPU,
-                            torch_npu.profiler.ProfilerActivity.NPU,
-                        ],
-                        schedule=torch_npu.profiler.schedule(
-                            wait=0, warmup=0, active=1, repeat=1, skip_first=0
-                        ),
-                        experimental_config=experimental_config,
-                        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
-                            "./npu_results_dbg"
-                        ),
+                                torch_npu.profiler.ProfilerActivity.CPU,
+                                torch_npu.profiler.ProfilerActivity.NPU
+                            ],
+                        schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=1, repeat=1, skip_first=0),
+                        experimental_config = experimental_config,
+                        with_stack=True,
+                        record_shapes=False,
+                        profile_memory=False,
+                        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(out_dir)
                     ) as prof:
                         result = self.run_batch(batch)
                         self.process_batch_result(batch, result)
                         prof.step()
+                        #has_profiled = True
                 else:
                     result = self.run_batch(batch)
                     self.process_batch_result(batch, result)
 
                 # result = self.run_batch(batch)
                 # self.process_batch_result(batch, result)
+
             else:
                 # When the server is idle, do self-check and re-init some states.
                 self.self_check_during_idle()
@@ -1300,6 +1313,7 @@ class Scheduler(
             self.last_batch = batch
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
+
 
     @DynamicGradMode()
     def event_loop_overlap(self):

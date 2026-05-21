@@ -992,426 +992,57 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         self._pad_inputs_to_size(model_runner, tokens_padded, self.batch_size)
 
     def post_forward_mlp_sync_batch(self, logits_output: LogitsProcessorOutput):
-        if logits_output is None:
-            return
 
-        # 先恢复原始 forward_mode / batch_size
         self.forward_mode = getattr(self, "_original_forward_mode", self.forward_mode)
         self.batch_size = getattr(self, "_original_batch_size", self.batch_size)
         bs = self.batch_size
 
-        def is_dllm_extend_mode():
-            return (
-                hasattr(self.forward_mode, "is_dllm_extend")
-                and self.forward_mode.is_dllm_extend()
-            )
-
-        def _flatten_full_logits(full_logits: torch.Tensor) -> torch.Tensor:
-            """
-            full_logits:
-            [N, V] or [B, T, V]
-
-            return:
-            [N, V]
-            """
-            if full_logits.dim() == 2:
-                return full_logits
-
-            if full_logits.dim() == 3:
-                return full_logits.reshape(-1, full_logits.shape[-1])
-
-            raise RuntimeError(
-                f"Unexpected full_logits ndim={full_logits.dim()}, "
-                f"shape={tuple(full_logits.shape)}"
-            )
-
-        def _select_last_logits_per_req(
-            full_logits: torch.Tensor,
-            bs: int,
-            use_extend_lens: bool = False,
-        ) -> torch.Tensor:
-            """
-            从 full_logits 中取每个 request 最后一个 token 的 logits。
-
-            输入可能是：
-            full_logits: [B, T, V]
-            full_logits: [B * T, V]
-            full_logits: [sum(extend_lens), V]
-
-            输出：
-            [B, V]
-            """
-            if full_logits.dim() == 3:
-                # [B, T, V] -> [B, V]
-                if full_logits.shape[0] != bs:
-                    raise RuntimeError(
-                        f"full_logits batch dim mismatch, "
-                        f"shape={tuple(full_logits.shape)}, bs={bs}"
-                    )
-                return full_logits[:, -1, :]
-
-            if full_logits.dim() != 2:
-                raise RuntimeError(
-                    f"Unexpected full_logits ndim={full_logits.dim()}, "
-                    f"shape={tuple(full_logits.shape)}"
-                )
-
-            # 已经是 [B, V]
-            if full_logits.shape[0] == bs:
-                return full_logits
-
-            # 变长 extend / dLLM extend，优先用 extend_lens 找每个 request 的最后 token
-            if use_extend_lens:
-                extend_lens = getattr(self, "extend_lens", None)
-
-                if extend_lens is not None:
-                    if isinstance(extend_lens, torch.Tensor):
-                        lens = extend_lens[:bs].to(
-                            device=full_logits.device,
-                            dtype=torch.long,
-                        )
-
-                        # 只有 lens 总和等于 full_logits token 数时，才使用这个路径
-                        if int(lens.sum().item()) == full_logits.shape[0]:
-                            idx = torch.cumsum(lens, dim=0) - 1
-                            return full_logits.index_select(0, idx)
-
-                    else:
-                        lens = list(extend_lens)[:bs]
-
-                        if len(lens) == bs and sum(int(x) for x in lens) == full_logits.shape[0]:
-                            idx = []
-                            offset = 0
-                            for l in lens:
-                                offset += int(l)
-                                idx.append(offset - 1)
-
-                            idx = torch.tensor(
-                                idx,
-                                device=full_logits.device,
-                                dtype=torch.long,
-                            )
-                            return full_logits.index_select(0, idx)
-
-            # 等长 block：
-            # [B * block, V] -> [B, block, V] -> [B, V]
-            if full_logits.shape[0] % bs == 0:
-                block = full_logits.shape[0] // bs
-                return full_logits.view(bs, block, -1)[:, -1, :]
-
-            raise RuntimeError(
-                f"Cannot select last logits per request from full_logits, "
-                f"shape={tuple(full_logits.shape)}, bs={bs}, "
-                f"use_extend_lens={use_extend_lens}"
-            )
-
-        def _ensure_next_token_logits(
-            expected_rows=None,
-            last_per_req: bool = False,
-            use_extend_lens: bool = False,
-        ):
-            """
-            只在 next_token_logits 缺失时，从 full_logits 重建。
-
-            last_per_req=True:
-            用于 decode / dllm_extend / draft_extend，
-            只取每个 request 最后一个 token 的 logits，输出 [B, V]。
-
-            expected_rows != None:
-            用于 target_verify / normal extend，
-            需要保留多个 token logits，输出 [expected_rows, V]。
-            """
-            if getattr(logits_output, "next_token_logits", None) is not None:
-                return
-
-            full_logits = getattr(logits_output, "full_logits", None)
-            if full_logits is None:
-                raise RuntimeError(
-                    "post_forward_mlp_sync_batch: both next_token_logits and full_logits are None"
-                )
-
-            if last_per_req:
-                logits_output.next_token_logits = _select_last_logits_per_req(
-                    full_logits,
-                    bs,
-                    use_extend_lens=use_extend_lens,
-                )
-                return
-
-            full_logits = _flatten_full_logits(full_logits)
-
-            if expected_rows is None:
-                logits_output.next_token_logits = full_logits
-            else:
-                logits_output.next_token_logits = full_logits[:expected_rows]
-
-        # ================================================================
-        # spec decode / verify / extend
-        # ================================================================
         if self.spec_info is not None:
-            if self.forward_mode.is_decode():
-                # draft decode
+            if self.forward_mode.is_decode():  # draft
                 num_tokens = self.hidden_states_backup.shape[0]
-
                 self.positions = self.positions[:num_tokens]
                 self.seq_lens = self.seq_lens[:bs]
                 self.req_pool_indices = self.req_pool_indices[:bs]
-
                 if self.seq_lens_cpu is not None:
                     self.seq_lens_cpu = self.seq_lens_cpu[:bs]
-
-                # decode 只需要 [B, V]，不要用 full_logits 当 next_token_logits
-                _ensure_next_token_logits(
-                    last_per_req=True,
-                    use_extend_lens=False,
-                )
-
-                logits_output.next_token_logits = logits_output.next_token_logits[:bs]
-
-                if getattr(logits_output, "hidden_states", None) is not None:
-                    logits_output.hidden_states = logits_output.hidden_states[:num_tokens]
-
-            elif self.forward_mode.is_target_verify():
-                # verify 需要 B * draft_token_num 个 token 的 logits
+                logits_output.next_token_logits = logits_output.next_token_logits[
+                    :num_tokens
+                ]
+                logits_output.hidden_states = logits_output.hidden_states[:num_tokens]
+            elif self.forward_mode.is_target_verify():  # verify
                 num_tokens = bs * self.spec_info.draft_token_num
-
-                _ensure_next_token_logits(
-                    expected_rows=num_tokens,
-                    last_per_req=False,
-                )
-
-                logits_output.next_token_logits = logits_output.next_token_logits[:num_tokens]
-
-                if getattr(logits_output, "hidden_states", None) is not None:
-                    logits_output.hidden_states = logits_output.hidden_states[:num_tokens]
-
-            elif self.forward_mode.is_draft_extend():
+                logits_output.next_token_logits = logits_output.next_token_logits[
+                    :num_tokens
+                ]
+                logits_output.hidden_states = logits_output.hidden_states[:num_tokens]
+            elif self.forward_mode.is_draft_extend():  # draft extend
                 self.spec_info.accept_length = self.spec_info.accept_length[:bs]
-
-                # draft_extend 只保留每个 request 的最后一个 logits
-                _ensure_next_token_logits(
-                    last_per_req=True,
-                    use_extend_lens=True,
-                )
-
                 logits_output.next_token_logits = logits_output.next_token_logits[:bs]
-
-                if getattr(logits_output, "hidden_states", None) is not None:
-                    logits_output.hidden_states = logits_output.hidden_states[:bs]
-
-            elif self.forward_mode.is_draft_extend_v2():
-                num_tokens = bs * self.spec_info.num_tokens_per_req
-
-                _ensure_next_token_logits(
-                    expected_rows=num_tokens,
-                    last_per_req=False,
-                )
-
-                logits_output.next_token_logits = logits_output.next_token_logits[:num_tokens]
-
-                if getattr(logits_output, "hidden_states", None) is not None:
-                    logits_output.hidden_states = logits_output.hidden_states[:num_tokens]
-
-            elif self.forward_mode.is_extend() or is_dllm_extend_mode() or self.forward_mode.is_idle():
-                # spec extend / dllm_extend / idle：
-                # full_logits 保留给 dLLM 使用；
-                # next_token_logits 只取每个 request 的最后一个 token，避免显存爆掉。
-                _ensure_next_token_logits(
-                    last_per_req=True,
-                    use_extend_lens=True,
-                )
-
+                logits_output.hidden_states = logits_output.hidden_states[:bs]
+            elif self.forward_mode.is_draft_extend_v2():  # draft extend_v2
+                bs = bs * self.spec_info.num_tokens_per_req
                 logits_output.next_token_logits = logits_output.next_token_logits[:bs]
-
-                if getattr(logits_output, "hidden_states", None) is not None:
-                    logits_output.hidden_states = logits_output.hidden_states[:bs]
-
-            else:
-                raise NotImplementedError(
-                    f"Unsupported spec forward_mode={self.forward_mode}"
-                )
+                logits_output.hidden_states = logits_output.hidden_states[:bs]
+            elif self.forward_mode.is_extend() or self.forward_mode.is_idle():
+                logits_output.next_token_logits = logits_output.next_token_logits[:bs]
+                logits_output.hidden_states = logits_output.hidden_states[:bs]
 
             if hasattr(self, "hidden_states_backup"):
                 self.spec_info.hidden_states = self.hidden_states_backup
-
             if hasattr(self, "output_cache_loc_backup"):
                 self.out_cache_loc = self.output_cache_loc_backup
 
-        # ================================================================
-        # normal decode / extend
-        # ================================================================
         elif self.forward_mode.is_decode() or self.forward_mode.is_idle():
-            # normal decode 也只需要 [B, V]
-            _ensure_next_token_logits(
-                last_per_req=True,
-                use_extend_lens=False,
-            )
-
             logits_output.next_token_logits = logits_output.next_token_logits[:bs]
-
-            if getattr(logits_output, "hidden_states", None) is not None:
+            if logits_output.hidden_states is not None:
                 logits_output.hidden_states = logits_output.hidden_states[:bs]
-
-        elif is_dllm_extend_mode():
-            # dLLM extend：
-            # full_logits 继续留在 logits_output.full_logits；
-            # next_token_logits 只取 [B, V]，避免 full_logits 生命周期被 next_token_logits 拉长。
-            _ensure_next_token_logits(
-                last_per_req=True,
-                use_extend_lens=True,
-            )
-
-            logits_output.next_token_logits = logits_output.next_token_logits[:bs]
-
-            if getattr(logits_output, "hidden_states", None) is not None:
-                logits_output.hidden_states = logits_output.hidden_states[:bs]
-
         elif self.forward_mode.is_extend():
-            # 普通 extend 保持原始语义：保留 seq_lens_sum 个 token logits
             num_tokens = self.seq_lens_sum
-
-            _ensure_next_token_logits(
-                expected_rows=num_tokens,
-                last_per_req=False,
-            )
-
-            logits_output.next_token_logits = logits_output.next_token_logits[:num_tokens]
-
-            if getattr(logits_output, "hidden_states", None) is not None:
+            logits_output.next_token_logits = logits_output.next_token_logits[
+                :num_tokens
+            ]
+            if logits_output.hidden_states is not None:
                 logits_output.hidden_states = logits_output.hidden_states[:num_tokens]
-
-        else:
-            raise NotImplementedError(
-                f"Unsupported forward_mode={self.forward_mode}"
-            )
-
-        # # ==================== debug ====================
-        # if not hasattr(self, "_debug_printed_logits_shape"):
-        #     self._debug_printed_logits_shape = True
-        #     print(
-        #         "[debug logits]",
-        #         "mode=", self.forward_mode,
-        #         "bs=", bs,
-        #         "full_shape=",
-        #         None if getattr(logits_output, "full_logits", None) is None
-        #         else tuple(logits_output.full_logits.shape),
-        #         "next_shape=",
-        #         None if getattr(logits_output, "next_token_logits", None) is None
-        #         else tuple(logits_output.next_token_logits.shape),
-        #         "hidden_shape=",
-        #         None if getattr(logits_output, "hidden_states", None) is None
-        #         else tuple(logits_output.hidden_states.shape),
-        #         flush=True,
-        #     )
-
-    # def post_forward_mlp_sync_batch(self, logits_output: LogitsProcessorOutput):
-
-    #     if logits_output is None:
-    #         return
-
-    #     if getattr(logits_output, "next_token_logits", None) is None:
-    #         if getattr(logits_output, "full_logits", None) is not None:
-    #             logits_output.next_token_logits = logits_output.full_logits
-    #         else:
-    #             raise RuntimeError(
-    #                 "post_forward_mlp_sync_batch: both next_token_logits and full_logits are None"
-    #             )
-
-    #     self.forward_mode = getattr(self, "_original_forward_mode", self.forward_mode)
-    #     self.batch_size = getattr(self, "_original_batch_size", self.batch_size)
-    #     bs = self.batch_size
-
-    #     if self.spec_info is not None:
-    #         if self.forward_mode.is_decode():  # draft
-    #             num_tokens = self.hidden_states_backup.shape[0]
-    #             self.positions = self.positions[:num_tokens]
-    #             self.seq_lens = self.seq_lens[:bs]
-    #             self.req_pool_indices = self.req_pool_indices[:bs]
-    #             if self.seq_lens_cpu is not None:
-    #                 self.seq_lens_cpu = self.seq_lens_cpu[:bs]
-
-    #             # --------------------- zxx deepep -------------------------------
-    #             if logits_output is None:
-    #                 return
-
-    #             # if getattr(logits_output, "next_token_logits", None) is None:
-    #             #     full_logits = getattr(logits_output, "full_logits", None)
-    #             #     if full_logits is None:
-    #             #         raise RuntimeError(
-    #             #             "post_forward_mlp_sync_batch: both next_token_logits and full_logits are None"
-    #             #         )
-
-    #                 bs = self.batch_size
-
-    #                 if full_logits.dim() == 3:
-    #                     # [B, blk, V] -> 取每个 request 的最后一个位置
-    #                     logits_output.next_token_logits = full_logits[:, -1, :].contiguous()
-
-    #                 elif full_logits.dim() == 2:
-    #                     # [B*blk, V] 或 [B, V]
-    #                     if full_logits.shape[0] == bs:
-    #                         logits_output.next_token_logits = full_logits.contiguous()
-    #                     else:
-    #                         if full_logits.shape[0] % bs != 0:
-    #                             raise RuntimeError(
-    #                                 f"Cannot rebuild next_token_logits from full_logits, "
-    #                                 f"shape={tuple(full_logits.shape)}, batch_size={bs}"
-    #                             )
-    #                         blk = full_logits.shape[0] // bs
-    #                         logits_output.next_token_logits = (
-    #                             full_logits.view(bs, blk, -1)[:, -1, :].contiguous()
-    #                         )
-    #                 else:
-    #                     raise RuntimeError(
-    #                         f"Unexpected full_logits ndim={full_logits.dim()}, "
-    #                         f"shape={tuple(full_logits.shape)}"
-    #                     )
-                    
-    #             print(
-    #                     "[mlp_sync] next_none=", getattr(logits_output, "next_token_logits", None) is None,
-    #                     "full_shape=", None if getattr(logits_output, "full_logits", None) is None
-    #                                 else tuple(logits_output.full_logits.shape)
-    #                 )
-    #             # ------------------------------------------------------------------
-
-    #             logits_output.next_token_logits = logits_output.next_token_logits[
-    #                 :num_tokens
-    #             ]
-    #             logits_output.hidden_states = logits_output.hidden_states[:num_tokens]
-    #         elif self.forward_mode.is_target_verify():  # verify
-    #             num_tokens = bs * self.spec_info.draft_token_num
-    #             logits_output.next_token_logits = logits_output.next_token_logits[
-    #                 :num_tokens
-    #             ]
-    #             logits_output.hidden_states = logits_output.hidden_states[:num_tokens]
-    #         elif self.forward_mode.is_draft_extend():  # draft extend
-    #             self.spec_info.accept_length = self.spec_info.accept_length[:bs]
-    #             logits_output.next_token_logits = logits_output.next_token_logits[:bs]
-    #             logits_output.hidden_states = logits_output.hidden_states[:bs]
-    #         elif self.forward_mode.is_draft_extend_v2():  # draft extend_v2
-    #             bs = bs * self.spec_info.num_tokens_per_req
-    #             logits_output.next_token_logits = logits_output.next_token_logits[:bs]
-    #             logits_output.hidden_states = logits_output.hidden_states[:bs]
-    #         elif self.forward_mode.is_extend() or self.forward_mode.is_idle():
-    #             logits_output.next_token_logits = logits_output.next_token_logits[:bs]
-    #             logits_output.hidden_states = logits_output.hidden_states[:bs]
-
-    #         if hasattr(self, "hidden_states_backup"):
-    #             self.spec_info.hidden_states = self.hidden_states_backup
-    #         if hasattr(self, "output_cache_loc_backup"):
-    #             self.out_cache_loc = self.output_cache_loc_backup
-
-    #     elif self.forward_mode.is_decode() or self.forward_mode.is_idle():
-    #         logits_output.next_token_logits = logits_output.next_token_logits[:bs]
-    #         if logits_output.hidden_states is not None:
-    #             logits_output.hidden_states = logits_output.hidden_states[:bs]
-    #     elif self.forward_mode.is_extend():
-    #         num_tokens = self.seq_lens_sum
-    #         logits_output.next_token_logits = logits_output.next_token_logits[
-    #             :num_tokens
-    #         ]
-    #         if logits_output.hidden_states is not None:
-    #             logits_output.hidden_states = logits_output.hidden_states[:num_tokens]
 
     @property
     def can_run_tbo(self):

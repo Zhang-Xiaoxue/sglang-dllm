@@ -58,7 +58,12 @@ from sglang.srt.model_executor.forward_batch_info import (
     PPProxyTensors,
 )
 from sglang.srt.model_executor.input_buffers import ForwardInputBuffers
-from sglang.srt.utils import get_available_gpu_memory, is_npu, log_info_on_rank0
+from sglang.srt.utils import (
+    get_available_gpu_memory,
+    get_bool_env_var,
+    is_npu,
+    log_info_on_rank0,
+)
 
 # Suppress Dynamo warning about tracing through lru_cache-wrapped functions (e.g., is_arch_support_pdl).
 warnings.filterwarnings("ignore", message=".*lru_cache.*", module="torch._dynamo")
@@ -276,6 +281,24 @@ class PiecewiseCudaGraphRunner:
         # Set graph pool id globally to be able to use symmetric memory
         set_graph_pool_id(get_global_graph_memory_pool())
 
+        self.use_npu_dllm_graph_runner = (
+            is_npu()
+            and self.compile_config.compiler == "eager"
+            and self.model_runner.server_args.dllm_algorithm is not None
+            and self.model_runner.graph_runner is not None
+            and getattr(self.model_runner.graph_runner, "is_dllm", False)
+        )
+        if self.use_npu_dllm_graph_runner:
+            # On NPU dLLM, the regular graph runner already captures the fixed
+            # block-size DLLM_EXTEND path. Reuse it here so EXTEND dispatch can
+            # still report/use graph mode without forcing Dynamo to trace LLaDA2.
+            log_info_on_rank0(
+                logger,
+                "Use regular NPU graph runner for dLLM piecewise graph path.",
+            )
+            self.raw_num_tokens = 0
+            return
+
         with enable_piecewise_cuda_graph():
             language_model = getattr(
                 self.model_runner.model, "language_model", self.model_runner.model
@@ -417,6 +440,35 @@ class PiecewiseCudaGraphRunner:
         # TODO(yuwei): fix it
         if forward_batch.input_embeds is not None:
             return False
+
+        if self.use_npu_dllm_graph_runner:
+            graph_runner = self.model_runner.graph_runner
+            if graph_runner is None:
+                return False
+
+            num_tokens = len(forward_batch.input_ids)
+            expected_num_tokens = (
+                forward_batch.batch_size * graph_runner.num_tokens_per_bs
+            )
+            token_shape_matches = num_tokens == expected_num_tokens
+            graph_runner_can_run = (
+                token_shape_matches and graph_runner.can_run(forward_batch)
+            )
+            if (
+                not graph_runner_can_run
+                and get_bool_env_var("SGLANG_DEBUG_GRAPH_CAN_RUN", "False")
+            ):
+                log_info_on_rank0(
+                    logger,
+                    "NPU dLLM piecewise graph adapter can_run=False: "
+                    f"mode={forward_batch.forward_mode.name}, "
+                    f"batch_size={forward_batch.batch_size}, "
+                    f"num_tokens={num_tokens}, "
+                    f"expected_num_tokens={expected_num_tokens}, "
+                    f"token_shape_matches={token_shape_matches}",
+                )
+            return graph_runner_can_run
+
         num_tokens = len(forward_batch.input_ids)
         if forward_batch.return_logprob:
             for start_len, seq_len in zip(
@@ -742,6 +794,13 @@ class PiecewiseCudaGraphRunner:
         forward_batch: ForwardBatch,
         **kwargs,
     ) -> Union[LogitsProcessorOutput, PPProxyTensors, EmbeddingPoolerOutput]:
+        if self.use_npu_dllm_graph_runner:
+            return self.model_runner.graph_runner.replay(
+                forward_batch,
+                skip_attn_backend_init=False,
+                pp_proxy_tensors=kwargs.get("pp_proxy_tensors"),
+            )
+
         with enable_piecewise_cuda_graph():
             # Due to the dispatch kernel for MLA model, we init the metadata with original forward_batch
             self.model_runner.attn_backend.init_forward_metadata(forward_batch)
@@ -754,6 +813,10 @@ class PiecewiseCudaGraphRunner:
                 self.moe_layers,
                 self.moe_fusions,
             ):
+                # Keep DeepEP in the same low-latency mode used during piecewise
+                # capture. Normal DeepEP uses dynamic dispatch metadata that is not
+                # graph-friendly on NPU.
+                set_is_extend_in_batch(False)
                 output = self.model_runner.model.forward(
                     static_forward_batch.input_ids,
                     static_forward_batch.positions,
@@ -761,15 +824,23 @@ class PiecewiseCudaGraphRunner:
                     **kwargs,
                 )
                 if isinstance(output, LogitsProcessorOutput):
+                    next_token_logits = output.next_token_logits
+                    if next_token_logits is not None:
+                        next_token_logits = next_token_logits[: self.raw_num_tokens]
+
+                    full_logits = output.full_logits
+                    if full_logits is not None:
+                        full_logits = full_logits[: self.raw_num_tokens]
+
                     return LogitsProcessorOutput(
-                        next_token_logits=output.next_token_logits[
-                            : self.raw_num_tokens
-                        ],
+                        next_token_logits=next_token_logits,
+                        full_logits=full_logits,
                         hidden_states=(
                             output.hidden_states[: self.raw_num_tokens]
                             if output.hidden_states is not None
                             else None
                         ),
+                        customized_info=output.customized_info,
                     )
                 elif isinstance(output, EmbeddingPoolerOutput):
                     return output

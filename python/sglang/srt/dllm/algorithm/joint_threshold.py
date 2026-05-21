@@ -153,6 +153,7 @@ class JointThreshold(DllmAlgorithm):
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
         skip_attn_backend_init = False
+        can_run_cuda_graph = False
 
         max_iterations = self.block_size + self.max_post_edit_steps
         for _ in range(max_iterations):
@@ -162,7 +163,8 @@ class JointThreshold(DllmAlgorithm):
                 forward_batch, skip_attn_backend_init, pp_proxy_tensors=None
             )
             skip_attn_backend_init = True
-            logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+            logits_output = out.logits_output
+            can_run_cuda_graph = can_run_cuda_graph or out.can_run_graph
 
             if self.vectorized_decoding:
                 changed_any = joint_threshold_update_step_vectorized(
@@ -247,7 +249,8 @@ class JointThreshold(DllmAlgorithm):
             out = model_runner.forward(
                 forward_batch, skip_attn_backend_init, pp_proxy_tensors=None
             )
-            logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+            logits_output = out.logits_output
+            can_run_cuda_graph = can_run_cuda_graph or out.can_run_graph
 
         next_token_ids = torch.reshape(forward_batch.input_ids, (batch_size, -1))
         next_token_ids_list = [

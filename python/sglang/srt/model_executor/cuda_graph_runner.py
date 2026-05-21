@@ -676,7 +676,10 @@ class CudaGraphRunner:
             else cuda_graph_bs <= self.max_bs
         )
 
-        if self.require_mlp_sync:
+        needs_dp_cuda_graph_check = (
+            self.require_mlp_tp_gather or self.model_runner.server_args.enable_dp_attention
+        )
+        if self.require_mlp_sync and needs_dp_cuda_graph_check:
             is_bs_supported = is_bs_supported and forward_batch.can_run_dp_cuda_graph
 
         # NOTE: cuda graph cannot handle mixed batch (encoder_len = 0)
@@ -714,13 +717,47 @@ class CudaGraphRunner:
             else True
         )
 
-        return (
+        npu_dllm_deepep_graph_max_bs: Optional[int] = None
+        npu_dllm_deepep_bs_supported = True
+        if self.device == "npu" and self.is_dllm and get_moe_a2a_backend().is_deepep():
+            npu_dllm_deepep_graph_max_bs = int(
+                os.environ.get("SGLANG_NPU_DLLM_DEEPEP_GRAPH_MAX_BS", "1")
+            )
+            npu_dllm_deepep_bs_supported = (
+                cuda_graph_bs <= npu_dllm_deepep_graph_max_bs
+            )
+
+        can_run = (
             is_bs_supported
             and is_encoder_lens_supported
             and is_tbo_supported
             and capture_hidden_mode_matches
             and is_ngram_supported
+            and npu_dllm_deepep_bs_supported
         )
+        if not can_run and get_bool_env_var("SGLANG_DEBUG_GRAPH_CAN_RUN", "False"):
+            log_info_on_rank0(
+                logger,
+                "CUDA graph can_run=False: "
+                f"mode={forward_batch.forward_mode.name}, "
+                f"batch_size={forward_batch.batch_size}, "
+                f"graph_key={graph_key}, "
+                f"bs_supported={is_bs_supported}, "
+                f"require_mlp_sync={self.require_mlp_sync}, "
+                f"require_mlp_tp_gather={self.require_mlp_tp_gather}, "
+                f"require_attn_tp_gather={self.require_attn_tp_gather}, "
+                f"has_global_num_tokens={forward_batch.global_num_tokens_cpu is not None}, "
+                f"can_run_dp_cuda_graph={forward_batch.can_run_dp_cuda_graph}, "
+                f"encoder_lens_supported={is_encoder_lens_supported}, "
+                f"tbo_supported={is_tbo_supported}, "
+                f"capture_hidden_mode_matches={capture_hidden_mode_matches}, "
+                f"requested_hidden_mode={requested_capture_hidden_mode.name}, "
+                f"captured_hidden_mode={self.capture_hidden_mode.name}, "
+                f"ngram_supported={is_ngram_supported}, "
+                f"npu_dllm_deepep_graph_max_bs={npu_dllm_deepep_graph_max_bs}, "
+                f"npu_dllm_deepep_bs_supported={npu_dllm_deepep_bs_supported}",
+            )
+        return can_run
 
     def _init_profile_context_and_memory_record(self):
         profile_context = profile(

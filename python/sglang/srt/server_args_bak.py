@@ -1068,24 +1068,12 @@ class ServerArgs:
         # 5. Pipeline parallelism
         if self.pp_size > 1:
             self.disable_piecewise_cuda_graph = True
-        
         # 6. Non-CUDA hardware (AMD, NPU, CPU, MPS, MUSA, XPU, etc.)
-        if is_hip() or is_cpu() or is_mps() or is_musa() or is_xpu():
+        if is_hip() or is_npu() or is_cpu() or is_mps() or is_musa() or is_xpu():
             self.disable_piecewise_cuda_graph = True
-        if is_npu():
-            self.piecewise_cuda_graph_compiler = "eager"
-        
         # 7. MoE A2A backend
         if self.moe_a2a_backend != "none":
-            if is_npu() and self.moe_a2a_backend == "deepep":
-                self.piecewise_cuda_graph_compiler = "eager"
-                logger.warning(
-                    "Piecewise NPU graph with DeepEP is enabled experimentally; "
-                    "MoE/DeepEP is kept as a split op and dense graph segments are captured."
-                )
-            else:
-                self.disable_piecewise_cuda_graph = True
-
+            self.disable_piecewise_cuda_graph = True
         # 8. LoRA
         if self.lora_paths or self.enable_lora:
             self.disable_piecewise_cuda_graph = True
@@ -1099,16 +1087,9 @@ class ServerArgs:
             or check_gguf_file(self.model_path)
         ):
             self.disable_piecewise_cuda_graph = True
-
-        # 11. DLLM (diffusion LLM) models. CUDA/Dynamo cannot handle the
-        # context-manager-heavy forward path, but NPU uses the eager piecewise
-        # backend and can still capture the graph segments.
+        # 11. DLLM (diffusion LLM) models (context manager in forward breaks dynamo)
         if self.dllm_algorithm is not None:
-            if not is_npu():
-                self.disable_piecewise_cuda_graph = True
-            else:
-                self.piecewise_cuda_graph_compiler = "eager"
-
+            self.disable_piecewise_cuda_graph = True
         # 12. CPU offload (breaks dynamo)
         if self.cpu_offload_gb > 0 or self.enable_hierarchical_cache:
             self.disable_piecewise_cuda_graph = True
@@ -2686,53 +2667,6 @@ class ServerArgs:
             if self.deepep_mode == "normal":
                 logger.warning("Cuda graph is disabled because deepep_mode=`normal`")
                 self.disable_cuda_graph = True
-            if is_npu() and not self.disable_cuda_graph:
-                moe_top_k = 8
-                try:
-                    hf_config = self.get_model_config().hf_config
-                    for attr in (
-                        "num_experts_per_tok",
-                        "moe_top_k",
-                        "num_experts_per_token",
-                        "num_selected_experts",
-                    ):
-                        value = getattr(hf_config, attr, None)
-                        if value is not None:
-                            moe_top_k = int(value)
-                            break
-                except Exception:
-                    pass
-                deepep_ll_required_tokens = min(
-                    1024,
-                    max(
-                        64,
-                        (self.cuda_graph_max_bs or self.max_running_requests or 1)
-                        * moe_top_k,
-                    ),
-                )
-                deepep_ll_max_tokens = (
-                    envs.SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.get()
-                )
-                if (
-                    not envs.SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.is_set()
-                    and deepep_ll_max_tokens < deepep_ll_required_tokens
-                ):
-                    envs.SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.set(
-                        deepep_ll_required_tokens
-                    )
-                    logger.warning(
-                        "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK is raised "
-                        f"to {deepep_ll_required_tokens} for NPU graph capture with "
-                        "DeepEP low-latency mode. Use a smaller --cuda-graph-max-bs "
-                        "if this consumes too much memory."
-                    )
-                elif deepep_ll_max_tokens > deepep_ll_required_tokens * 2:
-                    logger.warning(
-                        "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK is much larger "
-                        f"than the estimated graph requirement ({deepep_ll_max_tokens} vs "
-                        f"{deepep_ll_required_tokens}). This can require a very large "
-                        "HCCL_BUFFSIZE on Ascend DeepEP."
-                    )
             self.ep_size = self.tp_size
             logger.warning(
                 f"DeepEP MoE is enabled. The expert parallel size is adjusted to be the same as the tensor parallel size[{self.tp_size}]."

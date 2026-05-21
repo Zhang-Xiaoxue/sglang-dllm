@@ -163,6 +163,7 @@ class LowConfidence(DllmAlgorithm):
             start_list = prompt_masks.sum(dim=1).tolist()
 
         skip_attn_backend_init = False
+        can_run_cuda_graph = False
 
         for _ in range(self.block_size):
             mask_index = forward_batch.input_ids == self.mask_id
@@ -173,7 +174,8 @@ class LowConfidence(DllmAlgorithm):
                 forward_batch, skip_attn_backend_init, pp_proxy_tensors=None
             )
             skip_attn_backend_init = True
-            logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+            logits_output = out.logits_output
+            can_run_cuda_graph = can_run_cuda_graph or out.can_run_graph
             assert batch_size == forward_batch.input_ids.shape[0] // self.block_size
             if self.vectorized_decoding:
                 parallel_decoding_update_input_ids_vectorized(
@@ -223,7 +225,8 @@ class LowConfidence(DllmAlgorithm):
         out = model_runner.forward(
             forward_batch, skip_attn_backend_init, pp_proxy_tensors=None
         )
-        logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+        logits_output = out.logits_output
+        can_run_cuda_graph = can_run_cuda_graph or out.can_run_graph
         # Here next token ids is tricky to implement the dynamic lengths,
         # so we return a list of tensors
         next_token_ids = torch.reshape(forward_batch.input_ids, (batch_size, -1))
