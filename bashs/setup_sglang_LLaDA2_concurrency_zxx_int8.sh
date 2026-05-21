@@ -147,21 +147,21 @@ echo "[INFO] Using quant model: ${QUANT_MODEL}"
 # ------------------------------ LLaDA2.1 Mini -------------------------------------
 python -m sglang.launch_server \
         --model-path "${QUANT_MODEL}" \
-	--served-model-name LLaDA2.1-mini \
+	    --served-model-name LLaDA2.1-mini \
         --host 0.0.0.0 \
         --port 8000 \
         --device npu \
         --attention-backend ascend \
         --dtype bfloat16 \
         --kv-cache-dtype auto \
-	--trust-remote-code \
-	--disable-radix-cache \
+	    --trust-remote-code \
+	    --disable-radix-cache \
         --mem-fraction-static 0.90 \
         --max-running-requests 1 \
         --dllm-algorithm "JointThreshold" \
         --dllm-algorithm-config /data/home/z84301856/proj_sglang/sglang_dllm_yuan/sglang-dllm/test/registered/dllm/joint_threshold.yaml \
         --enable-tokenizer-batch-encode \
-	--skip-server-warmup \
+	    --skip-server-warmup \
         --enable-cache-report \
         --tp 1 \
         --ep 1 \

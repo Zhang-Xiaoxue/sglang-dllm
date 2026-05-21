@@ -206,6 +206,8 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
         forward_batch: ForwardBatch,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
+        self.deepep_adapter.replay()
+
         if forward_batch.needs_forward_metadata_init():
             self.replay_prepare(forward_batch, pp_proxy_tensors)
         else:
