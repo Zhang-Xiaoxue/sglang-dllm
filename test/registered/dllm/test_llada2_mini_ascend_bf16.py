@@ -13,15 +13,15 @@ from sglang.test.test_utils import (
     write_github_step_summary,
 )
 
-
+import time 
 class TestLLaDA2Mini(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         # cls._old_disable_acl = os.environ.get("SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT")
         # os.environ["SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT"] = "1"
 
-        cls.model = "/home/ma-user/work/z84301856/models/LLaDA2.1-mini"
-        # cls.model = "/home/ma-user/work/z84301856/models/LLaDA2.1-flash"
+        # cls.model = "/data/home/z84301856/proj_sglang/models/LLaDA/LLaDA2.1-flash"
+        cls.model = "/data/home/z84301856/proj_sglang/models/LLaDA/LLaDA2.1-mini"
 
         cls.base_url = DEFAULT_URL_FOR_TEST
 
@@ -33,12 +33,13 @@ class TestLLaDA2Mini(CustomTestCase):
             "--mem-fraction-static", "0.90",
             "--max-running-requests", "1",
             "--attention-backend", "ascend",
-            "--tp", "1",
+            "--tp", "4",
             "--ep", "1", 
             "--dp-size", "1",       
             "--moe-dp-size", "1",
-            "--moe-a2a-backend", "deepep", # "ascend_fuseep", "deepep" , "none"
-            "--deepep-mode", "auto",
+
+            # "--moe-a2a-backend", "deepep", # "ascend_fuseep", "deepep" , "none"
+            # "--deepep-mode", "auto",
             # "--cuda-graph-max-bs", "1",
             # "--disable-cuda-graph",
 
@@ -98,6 +99,8 @@ class TestLLaDA2Mini(CustomTestCase):
             )
             # if test speed lower than 130 tps, have to check the environ
             self.assertGreater(speed, 100)
+
+            time.sleep(100)  # sleep to make sure github action can upload the summary successfully before the server is killed
 
 
 if __name__ == "__main__":

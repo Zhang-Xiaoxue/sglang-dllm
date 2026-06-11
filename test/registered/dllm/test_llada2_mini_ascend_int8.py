@@ -20,11 +20,11 @@ class TestLLaDA2Mini(CustomTestCase):
         # cls._old_disable_acl = os.environ.get("SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT")
         # os.environ["SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT"] = "1"
 
-        # cls.model = "/workspace/models/LLaDA/git_download/LLaDA2.0-mini"
-        # cls.model = "/home/ma-user/work/z84301856/models/LLaDA2.1-mini"
+        # cls.model = "/data/home/z84301856/proj_sglang/models/LLaDA/LLaDA2.1-flash"
+        # cls.model = "/data/home/z84301856/proj_sglang/models/LLaDA/LLaDA2.1-mini"
 
-        cls.model = "/home/ma-user/work/z84301856/models/llada2p1_w8a8c16_quant_SparseMoe_final" #
-        # cls.model = "/home/ma-user/work/z84301856/models/llada2p1_flash_quant_sparseMoe_final" #
+        # cls.model = "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-flash-cannrecipe-w8a8c16-moe" #
+        cls.model = "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-mini-cannrecipe-w8a8c16-moe" #
 
         cls.base_url = DEFAULT_URL_FOR_TEST
 
@@ -39,7 +39,7 @@ class TestLLaDA2Mini(CustomTestCase):
             "1",
             "--attention-backend",
             "ascend",
-            "--tp", "2",
+            "--tp", "4",
             "--ep", "1", 
             "--dp-size", "1",       
             "--moe-dp-size", "1",

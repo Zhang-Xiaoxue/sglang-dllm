@@ -26,12 +26,7 @@ dependencies = [
   "decord2 ; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'armv7l')",
   "einops",
   "fastapi",
-<<<<<<< Updated upstream
-  "flashinfer_python[cu13]==0.6.12", # keep it aligned with jit-cache version in Dockerfile
-  "flashinfer_cubin==0.6.12",
-=======
   "easydict",
->>>>>>> Stashed changes
   "gguf",
   "hf_transfer",
   "huggingface_hub",
@@ -41,11 +36,6 @@ dependencies = [
   "msgspec",
   "ninja",
   "numpy",
-<<<<<<< Updated upstream
-  "nvidia-cutlass-dsl[cu13]==4.5.2",
-  "nvidia-ml-py",
-=======
->>>>>>> Stashed changes
   "openai-harmony==0.0.4",
   "openai==2.6.1",
   "orjson",
@@ -64,12 +54,6 @@ dependencies = [
   "scipy",
   "sentencepiece",
   "setproctitle",
-<<<<<<< Updated upstream
-  "flash-attn-4>=4.0.0b9",
-  "sgl-deep-gemm==0.1.2",
-  "sglang-kernel==0.4.3",
-=======
->>>>>>> Stashed changes
   "soundfile==0.13.1",
   "tiktoken",
   "timm==1.0.16",
@@ -81,40 +65,11 @@ dependencies = [
   "uvloop",
   "xgrammar==0.2.1",
   "smg-grpc-servicer>=0.5.0",
-<<<<<<< Updated upstream
-  "kernels>=0.14.1,<0.15",
-=======
->>>>>>> Stashed changes
 ]
 
 [project.optional-dependencies]
 checkpoint-engine = ["checkpoint-engine==0.1.2"]
 diffusion = [
-<<<<<<< Updated upstream
-  "PyYAML==6.0.1",
-  "cloudpickle==3.1.2",
-  "diffusers==0.37.0",
-  "imageio==2.36.0",
-  "imageio-ffmpeg==0.5.1",
-  "moviepy>=2.0.0",
-  "nvidia-modelopt",
-  "opencv-python-headless==4.10.0.84",
-  "remote-pdb==2.1.0",
-  "st_attn==0.0.7 ; platform_machine != 'aarch64' and platform_machine != 'arm64'",
-  "vsa==0.0.4 ; platform_machine != 'aarch64' and platform_machine != 'arm64'",
-  "runai_model_streamer>=0.15.7",
-  "cache-dit==1.3.0",
-  "addict==2.4.0",
-  "av==16.1.0",
-  "scikit-image==0.25.2",
-  "trimesh>=4.0.0",
-  "websockets",
-  "xatlas",
-]
-
-ray = [
-  "ray[default]>=2.54.0",
-=======
     "PyYAML==6.0.1",
     "cloudpickle",
     "diffusers==0.37.0",
@@ -128,7 +83,6 @@ ray = [
     "scikit-image==0.25.2",
     "trimesh>=4.0.0",
     "xatlas",
->>>>>>> Stashed changes
 ]
 
 tracing = [
@@ -166,8 +120,7 @@ sglang = "sglang.cli.main:main"
 [tool.setuptools.package-data]
 "sglang" = [
   "srt/**/*",
-  "jit_kernel/**/*",
-  "multimodal_gen/apps/realtime_webui/**/*"
+  "jit_kernel/**/*"
 ]
 
 [tool.setuptools.packages.find]
