@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="286" height="232" viewBox="0 0 286 232">
+<rect width="100%" height="100%" fill="white"/>
+<text x="143.0" y="24.0" font-family="Arial, sans-serif" font-size="18" text-anchor="middle" fill="#111827" font-weight="bold">INT8 / BF16 throughput speedup</text>
+<text x="28.0" y="43.0" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="#6b7280" font-weight="normal">bs/tp</text>
+<text x="115.0" y="42.0" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="#111827" font-weight="bold">tp=1</text>
+<text x="205.0" y="42.0" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="#111827" font-weight="bold">tp=4</text>
+<text x="54.0" y="83.0" font-family="Arial, sans-serif" font-size="11" text-anchor="end" fill="#111827" font-weight="bold">bs=1</text>
+<rect x="70" y="58" width="90" height="42" fill="rgb(123,188,133)" stroke="white"/>
+<text x="115.0" y="83.0" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="#111827" font-weight="bold">1.237x</text>
+<rect x="160" y="58" width="90" height="42" fill="rgb(184,122,122)" stroke="white"/>
+<text x="205.0" y="83.0" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="#111827" font-weight="bold">0.787x</text>
+<text x="54.0" y="125.0" font-family="Arial, sans-serif" font-size="11" text-anchor="end" fill="#111827" font-weight="bold">bs=4</text>
+<rect x="70" y="100" width="90" height="42" fill="rgb(60,153,74)" stroke="white"/>
+<text x="115.0" y="125.0" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="#111827" font-weight="bold">1.365x</text>
+<rect x="160" y="100" width="90" height="42" fill="rgb(182,221,190)" stroke="white"/>
+<text x="205.0" y="125.0" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="#111827" font-weight="bold">1.116x</text>
+<text x="54.0" y="167.0" font-family="Arial, sans-serif" font-size="11" text-anchor="end" fill="#111827" font-weight="bold">bs=8</text>
+<rect x="70" y="142" width="90" height="42" fill="rgb(62,154,76)" stroke="white"/>
+<text x="115.0" y="167.0" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="#111827" font-weight="bold">1.360x</text>
+<rect x="160" y="142" width="90" height="42" fill="#f3f4f6" stroke="white"/>
+<text x="205.0" y="167.0" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="#111827" font-weight="bold">-</text>
+</svg>

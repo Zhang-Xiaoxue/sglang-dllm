@@ -95,8 +95,10 @@ class TestLLaDA2(CustomTestCase):
     result_label = "int8"
     default_model_size = "mini"
     model_paths = {
-        "mini": "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-mini-cannrecipe-w8a8c16-moe",
-        "flash": "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-flash-cannrecipe-w8a8c16-moe",
+        # "mini": "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-mini-cannrecipe-w8a8c16-moe",
+        # "flash": "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-flash-cannrecipe-w8a8c16-moe",
+        "mini": "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-mini-cannrecipe-w8a8c16-moe-attn-v1",
+        "flash": "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-flash-cannrecipe-w8a8c16-moe-attn-v1",
     }
     default_tp = "4"
     default_ep = "1"

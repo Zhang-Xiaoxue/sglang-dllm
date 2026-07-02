@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7} #
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
@@ -96,10 +96,10 @@ INT8_CASES=(
   # "32 8 1 1 none"
 )
 
-# for case_cfg in "${BF16_CASES[@]}"; do
-#   read -r bs tp ep dp moe_a2a_backend <<< "$case_cfg"
-#   run_case bf16 "$bs" "$tp" "$ep" "$dp" "$moe_a2a_backend"
-# done
+for case_cfg in "${BF16_CASES[@]}"; do
+  read -r bs tp ep dp moe_a2a_backend <<< "$case_cfg"
+  run_case bf16 "$bs" "$tp" "$ep" "$dp" "$moe_a2a_backend"
+done
 
 for case_cfg in "${INT8_CASES[@]}"; do
   read -r bs tp ep dp moe_a2a_backend <<< "$case_cfg"

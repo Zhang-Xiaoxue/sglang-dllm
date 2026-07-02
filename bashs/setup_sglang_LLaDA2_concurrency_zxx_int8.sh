@@ -19,10 +19,80 @@
 
 # quant: llada2p1_w8a8c16_quant_SparseMoe_final , llada2p1_flash_quant_sparseMoe_final
 
+MODEL_ROOT=${LLADA_MODEL_ROOT:-/data/home/z84301856/proj_sglang/models/LLaDA}
+
+# 默认保留原先脚本里的较短量化模型；需要切换时传 static/static-more 或完整模型目录。
+DEFAULT_QUANT_MODEL=${LLADA_DEFAULT_QUANT_MODEL:-${MODEL_ROOT}/llada2.1-mini-modelslim-w8a8c16-moe-dynamic-act3}
+STATIC_QUANT_MODEL=${LLADA_STATIC_QUANT_MODEL:-${MODEL_ROOT}/llada2.1-mini-modelslim-w8a8c16-moe-static}
+STATIC_MORE_CALIB_QUANT_MODEL=${LLADA_STATIC_MORE_CALIB_QUANT_MODEL:-${MODEL_ROOT}/llada2.1-mini-modelslim-w8a8c16-moe-static-moreCalib}
+QUANT_MODEL=${LLADA_QUANT_MODEL_PATH:-${LLADA_QUANT_MODEL:-${DEFAULT_QUANT_MODEL}}}
+
+print_usage() {
+    echo "Usage: bash $0 [default|short|dynamic|static|static-more|/path/to/quant_model]"
+    echo "       bash $0 --quant-model-path /path/to/quant_model"
+    echo "       LLADA_QUANT_MODEL=static bash $0"
+}
+
+resolve_quant_model() {
+    case "$1" in
+        default|short|dynamic|dynamic-act3)
+            echo "${DEFAULT_QUANT_MODEL}"
+            ;;
+        static)
+            echo "${STATIC_QUANT_MODEL}"
+            ;;
+        static-more|static-moreCalib|static-morecalib|moreCalib|morecalib|more)
+            echo "${STATIC_MORE_CALIB_QUANT_MODEL}"
+            ;;
+        *)
+            echo "$1"
+            ;;
+    esac
+}
+
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        --quant-model|--quant-model-path|--model-path)
+            if [[ $# -lt 2 ]]; then
+                echo "[ERROR] Missing value for $1"
+                print_usage
+                exit 1
+            fi
+            QUANT_MODEL=$2
+            shift 2
+            ;;
+        *)
+            QUANT_MODEL=$1
+            shift
+            ;;
+    esac
+fi
+
+if [[ $# -gt 0 ]]; then
+    echo "[ERROR] Unknown extra arguments: $*"
+    print_usage
+    exit 1
+fi
+
+QUANT_MODEL=$(resolve_quant_model "${QUANT_MODEL}")
+if [[ ! -f "${QUANT_MODEL}/config.json" ]]; then
+    echo "[ERROR] Quant model path is not ready: ${QUANT_MODEL}"
+    echo "        Expected config.json under this model directory."
+    print_usage
+    exit 1
+fi
+
+echo "[INFO] Using quant model: ${QUANT_MODEL}"
+
+
 ################################### cann-recipe quantization ############################################################
-# ------------------------------ LLaDA2.1 Mini -------------------------------------
+# # ------------------------------ LLaDA2.1 Mini -------------------------------------
 # python -m sglang.launch_server \
-#         --model-path /data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-mini-cannrecipe-w8a8c16-moe \
+#         --model-path /data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-mini-cannrecipe-w8a8c16-moe-attn-v1 \
 # 	--served-model-name LLaDA2.1-mini \
 #         --host 0.0.0.0 \
 #         --port 8000 \
@@ -39,8 +109,8 @@
 #         --enable-tokenizer-batch-encode \
 # 	--skip-server-warmup \
 #         --enable-cache-report \
-#         --tp 2 \
-#         --ep 2 \
+#         --tp 1 \
+#         --ep 1 \
 #         --quantization compressed-tensors \
 #         # --disable-cuda-graph
         
@@ -76,7 +146,7 @@
 ##################################### modelslim quantization #####################################
 # ------------------------------ LLaDA2.1 Mini -------------------------------------
 python -m sglang.launch_server \
-        --model-path /data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-mini-modelslim-w8a8c16-moe \
+        --model-path "${QUANT_MODEL}" \
 	--served-model-name LLaDA2.1-mini \
         --host 0.0.0.0 \
         --port 8000 \
@@ -95,7 +165,7 @@ python -m sglang.launch_server \
         --enable-cache-report \
         --tp 1 \
         --ep 1 \
-        --quantization modelslim \
+        --quantization modelslim
         # --disable-cuda-graph
         
         # --dllm-algorithm "LowConfidence" \

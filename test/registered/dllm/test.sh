@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
 # Run LLaDA2 Ascend regression tests and write CSV results.
 # Usage:
 #   ./test.sh

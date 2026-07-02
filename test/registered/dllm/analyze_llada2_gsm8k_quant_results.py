@@ -91,7 +91,15 @@ def safe_div(a, b):
 
 
 def latency_per_token_ms(row):
-    return safe_div(row.get("bs_latency"), row.get("bs_tokens")) * 1000
+    ratio = safe_div(row.get("bs_latency"), row.get("bs_tokens"))
+    return ratio * 1000 if ratio is not None else None
+
+
+def is_empty_result(row):
+    return all(
+        row.get(col) is None
+        for col in ("bs_speed", "gsm8k_output_throughput", "gsm8k_acc")
+    )
 
 
 def build_pairs(rows, include_warmup=False):
@@ -101,6 +109,8 @@ def build_pairs(rows, include_warmup=False):
             continue
         precision = row.get("precision")
         if precision not in ("bf16", "int8"):
+            continue
+        if is_empty_result(row):
             continue
         by_key_precision[key_for(row)][precision] = row
 

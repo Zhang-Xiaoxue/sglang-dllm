@@ -51,8 +51,10 @@ MODEL_PATHS = {
         "flash": "/data/home/z84301856/proj_sglang/models/LLaDA/LLaDA2.1-flash",
     },
     "int8": {
-        "mini": "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-mini-cannrecipe-w8a8c16-moe",
-        "flash": "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-flash-cannrecipe-w8a8c16-moe",
+        # "mini": "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-mini-cannrecipe-w8a8c16-moe",
+        # "flash": "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-flash-cannrecipe-w8a8c16-moe",
+        "mini": "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-mini-cannrecipe-w8a8c16-moe-attn-v1",
+        "flash": "/data/home/z84301856/proj_sglang/models/LLaDA/llada2.1-flash-cannrecipe-w8a8c16-moe-attn-v1",        
     },
 }
 QUANTIZATION = {

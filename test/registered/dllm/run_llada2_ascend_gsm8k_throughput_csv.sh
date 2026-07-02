@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7} # 
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
@@ -75,11 +75,11 @@ BF16_CASES=(
   "8 4 1 1 none"
   "16 4 1 1 none"
   "32 4 1 1 none"
-  "1 8 1 1 none"
-  "4 8 1 1 none"
-  "8 8 1 1 none"
-  "16 8 1 1 none"
-  "32 8 1 1 none"
+  # "1 8 1 1 none"
+  # "4 8 1 1 none"
+  # "8 8 1 1 none"
+  # "16 8 1 1 none"
+  # "32 8 1 1 none"
   # "64 8 1 1 none"  OOM for flash, and mini with some configs, so skip by default. Can be enabled when needed.
 )
 
@@ -102,11 +102,11 @@ INT8_CASES=(
   "8 4 1 1 none"
   "16 4 1 1 none"
   "32 4 1 1 none"
-  "1 8 1 1 none"
-  "4 8 1 1 none"
-  "8 8 1 1 none"
-  "16 8 1 1 none"
-  "32 8 1 1 none"
+  # "1 8 1 1 none"
+  # "4 8 1 1 none"
+  # "8 8 1 1 none"
+  # "16 8 1 1 none"
+  # "32 8 1 1 none"
   # "64 8 1 1 none"  OOM for flash, and mini with some configs, so skip by default. Can be enabled when needed.
 )
 
