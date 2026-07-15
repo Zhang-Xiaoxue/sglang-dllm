@@ -1,0 +1,516 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "LLaDA2 Mini 4-NPU EP 性能走势分析",
+    "description": "backend=none、TP=4、BF16 下不同 BS 与 EP 的单次测试诊断",
+    "generatedAt": "2026-07-15T10:39:37.139Z",
+    "sources": [
+      {
+        "id": "benchmark_csv",
+        "label": "LLaDA2 mini 4-NPU EP benchmark CSV",
+        "path": "test/registered/dllm/llada2_gsm8k_ep_test_mini_0715_4NPUs.csv",
+        "query": {
+          "engine": "local_csv",
+          "language": "csv",
+          "description": "Matrix benchmark output for LLaDA2.1-mini BF16, TP=4, backend=none.",
+          "executed_at": "2026-07-15T10:39:37.139Z",
+          "filters": [
+            "model_size=mini",
+            "precision=bf16_ep",
+            "tp=4",
+            "dp=1",
+            "moe_a2a_backend=none",
+            "complete metric rows only in charts"
+          ],
+          "metric_definitions": [
+            "bs_speed = total completion tokens divided by the maximum end-to-end latency across responses in one batched /generate request.",
+            "gsm8k_output_throughput = total generated GSM8K output tokens divided by evaluation latency.",
+            "gsm8k_acc = exact-match accuracy over 200 GSM8K questions."
+          ],
+          "tables_used": [
+            "llada2_gsm8k_ep_test_mini_0715_4NPUs.csv"
+          ]
+        }
+      },
+      {
+        "id": "runtime_code",
+        "label": "LLaDA2 EP benchmark and runtime configuration",
+        "query": {
+          "engine": "local_source",
+          "language": "python/bash/yaml",
+          "description": "Runtime and test definitions used to interpret batch size, block size, max running requests, and EP/TP behavior.",
+          "executed_at": "2026-07-15T10:39:37.139Z",
+          "tables_used": [
+            "test_llada2_ascend_gsm8k_ep_bf16.py",
+            "joint_threshold.yaml",
+            "parallel_state.py"
+          ]
+        }
+      }
+    ],
+    "charts": [
+      {
+        "id": "fixed_batch_speed",
+        "title": "固定长度批量吞吐",
+        "subtitle": "每个请求生成 512 token；单位：output token/s",
+        "intent": "comparison",
+        "question": "不同 BS 下，哪种 EP 配置的固定长度批量吞吐最高？",
+        "rationale": "BS 是离散测试档位，分组柱状图可以直接比较每个档位的三种 EP 配置。",
+        "comparisonContext": {
+          "baseline": "同一 BS 下比较 EP=1、EP=2、EP=4",
+          "denominator": "批量请求最大端到端延迟",
+          "grain": "BS × EP 单次测试",
+          "unit": "output token/s"
+        },
+        "type": "bar",
+        "dataset": "fixed_speed_wide",
+        "sourceId": "benchmark_csv",
+        "xField": "bs",
+        "xAxisTitle": "Batch size",
+        "yAxisTitle": "Output token/s",
+        "series": [
+          {
+            "field": "ep1",
+            "label": "EP=1",
+            "color": "blue",
+            "role": "actual"
+          },
+          {
+            "field": "ep2",
+            "label": "EP=2",
+            "color": "orange",
+            "role": "comparison"
+          },
+          {
+            "field": "ep4",
+            "label": "EP=4",
+            "color": "pink",
+            "role": "comparison"
+          }
+        ],
+        "valueFormat": "number",
+        "unit": "token/s",
+        "layout": "full",
+        "palette": {
+          "kind": "categorical"
+        },
+        "settings": {
+          "groupMode": "grouped",
+          "orientation": "vertical",
+          "sort": "none",
+          "showValues": false
+        },
+        "labels": {
+          "values": "auto"
+        },
+        "legend": {
+          "position": "bottom",
+          "sort": "spec",
+          "title": "Expert parallel size"
+        },
+        "surface": {
+          "surface": "export",
+          "viewMode": "both"
+        }
+      },
+      {
+        "id": "gsm_throughput",
+        "title": "GSM8K 持续推理吞吐",
+        "subtitle": "200 道题、客户端并发 128；单位：output token/s",
+        "intent": "comparison",
+        "question": "真实变长请求负载下，哪种 EP 配置的持续吞吐最高？",
+        "rationale": "分组柱状图保留 BS 的离散顺序，并显示 EP 在同一负载下的差异。",
+        "comparisonContext": {
+          "baseline": "同一 BS 下比较 EP=1、EP=2、EP=4",
+          "denominator": "GSM8K 评测总耗时",
+          "grain": "BS × EP 单次测试",
+          "unit": "output token/s"
+        },
+        "type": "bar",
+        "dataset": "gsm_wide",
+        "sourceId": "benchmark_csv",
+        "xField": "bs",
+        "xAxisTitle": "Max running requests / BS",
+        "yAxisTitle": "Output token/s",
+        "series": [
+          {
+            "field": "ep1",
+            "label": "EP=1",
+            "color": "blue",
+            "role": "actual"
+          },
+          {
+            "field": "ep2",
+            "label": "EP=2",
+            "color": "orange",
+            "role": "comparison"
+          },
+          {
+            "field": "ep4",
+            "label": "EP=4",
+            "color": "pink",
+            "role": "comparison"
+          }
+        ],
+        "valueFormat": "number",
+        "unit": "token/s",
+        "layout": "full",
+        "palette": {
+          "kind": "categorical"
+        },
+        "settings": {
+          "groupMode": "grouped",
+          "orientation": "vertical",
+          "sort": "none",
+          "showValues": false
+        },
+        "labels": {
+          "values": "auto"
+        },
+        "legend": {
+          "position": "bottom",
+          "sort": "spec",
+          "title": "Expert parallel size"
+        },
+        "surface": {
+          "surface": "export",
+          "viewMode": "both"
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "case_results",
+        "title": "完整 case 明细",
+        "subtitle": "TP=4、DP=1、backend=none；空指标按失败记录，不把未出现的 EP=1/BS=128 当作 OOM",
+        "dataset": "case_results",
+        "defaultSort": {
+          "field": "sort_key",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "sourceId": "benchmark_csv",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "bs",
+            "label": "BS",
+            "format": "number"
+          },
+          {
+            "field": "ep",
+            "label": "EP",
+            "format": "number"
+          },
+          {
+            "field": "moe_tp",
+            "label": "MoE TP",
+            "format": "number"
+          },
+          {
+            "field": "status",
+            "label": "Status",
+            "type": "text"
+          },
+          {
+            "field": "bs_speed",
+            "label": "Fixed-batch token/s",
+            "format": "number"
+          },
+          {
+            "field": "gsm_throughput",
+            "label": "GSM8K token/s",
+            "format": "number"
+          },
+          {
+            "field": "gsm_accuracy",
+            "label": "GSM8K accuracy",
+            "format": "percent"
+          }
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# LLaDA2 Mini 4-NPU EP 性能走势分析"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "sourceId": "benchmark_csv",
+        "body": "## 技术结论\n\n当前 CSV 已经不再是 `BS>32` 全部 OOM：`BS=64` 的 EP=1/2/4 均成功，失败边界移动到 `BS=128`。固定 512-token 批量测试的峰值是 **BS=64、EP=1：1,650.6 token/s**；GSM8K 持续负载的峰值是 **BS=64、EP=2：1,156.9 token/s**。这说明吞吐随 BS 增大先快速提升、随后进入饱和区，而最佳 EP 取决于请求长度是否固定。"
+      },
+      {
+        "id": "fixed_finding",
+        "type": "markdown",
+        "sourceId": "benchmark_csv",
+        "body": "## 固定长度负载在 BS=64 时转向 EP=1\n\n从 BS=4 到 BS=32，EP=2 的固定批量吞吐提高 **100.8%**，并在 BS=32 达到 **1,530.3 token/s**。继续提高到 BS=64 后，EP=2 反而下降 **11.3%**；EP=1 则继续提高 **23.0%**，达到全表最高值。EP=1 保留 `moe_tp=4`，所有 routed token-expert pair 都参与每个 expert 的 TP 分片计算；随着 token 数增大，expert GEMM 的 M 维更大、更容易利用 NPU。EP=2/4 则把 token 分散到本地 expert，在 backend=none 下仍承担同步和负载不均衡代价。"
+      },
+      {
+        "id": "fixed_chart_block",
+        "type": "chart",
+        "chartId": "fixed_batch_speed",
+        "layout": "full"
+      },
+      {
+        "id": "gsm_finding",
+        "type": "markdown",
+        "sourceId": "benchmark_csv",
+        "body": "## 变长 GSM8K 负载让 EP=2 成为折中点\n\nGSM8K 吞吐从 BS=4 提高到 BS=32 时接近翻倍，但从 BS=32 到 BS=64 只再提高 **1.4%–10.2%**，已经明显进入饱和区。BS=64 下 EP=2 以 **1,156.9 token/s** 领先 EP=1 约 **4.3%**、领先 EP=4 约 **6.8%**。GSM8K 请求长度不同，实际 active batch 会随请求完成而波动；EP=2 的 `moe_tp=2` 可能在 expert GEMM 尺寸、路由分散和同步成本之间形成更稳定的折中。该解释是代码路径支持的性能假设，尚未由逐层 profiler 直接验证。"
+      },
+      {
+        "id": "gsm_chart_block",
+        "type": "chart",
+        "chartId": "gsm_throughput",
+        "layout": "full"
+      },
+      {
+        "id": "oom_finding",
+        "type": "markdown",
+        "sourceId": "benchmark_csv",
+        "body": "## 显存调整把可运行上限从 BS=32 推到了 BS=64\n\n本轮 `bs_tokens` 恰好等于 `BS×512`，说明新的 `BS_MAX_NEW_TOKENS=512` 已生效。BS=64 的三种 EP 都完成，BS=128 的 EP=4 和 EP=2 留下空指标；EP=1/BS=128 没有出现在文件中，因此只能判定矩阵未完整记录，不能仅凭 CSV 断言该 case OOM。固定 TP=4 时三种 EP 的每卡 expert 权重规模近似相同，OOM 边界主要由 `BS×32` DLLM block 激活、LM-head logits、attention/MoE workspace 和通信缓冲共同决定。"
+      },
+      {
+        "id": "detail_table_block",
+        "type": "table",
+        "tableId": "case_results",
+        "layout": "full"
+      },
+      {
+        "id": "scope",
+        "type": "markdown",
+        "sourceId": "benchmark_csv",
+        "body": "## 数据范围与指标\n\n范围为 LLaDA2.1-mini、BF16、4 NPU、TP=4、DP=1、backend=none。`bs_speed` 来自一次 `/generate` 批量请求，总输出 token 除以最慢响应的端到端延迟；当前每条请求固定生成 512 token。`gsm8k_output_throughput` 来自 200 道 GSM8K、客户端并发 128 的持续评测，服务端同时运行请求上限等于 BS。两者测量的是不同负载，不能用一个指标的最佳 EP 直接替代另一个。"
+      },
+      {
+        "id": "method",
+        "type": "markdown",
+        "sourceId": "runtime_code",
+        "body": "## 诊断方法\n\n分析只使用 CSV 中九个完整的 BS×EP 观测点，并按 BS 内比较 EP，再比较相邻 BS 的增幅。结合测试定义确认 DLLM block size 为 32、`max_running_requests=BS`，并使用 `moe_tp=TP/EP` 解释 expert 计算形状。这里没有使用逐层耗时、通信 trace 或显存时间线，因此结论属于描述性诊断，不是严格因果证明。"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## 局限与稳健性\n\n每个配置只有一次观测，没有误差条或重复运行；4% 左右的差距可能包含运行波动。GSM8K accuracy 在 82.0%–85.5% 之间，200 题样本下这种差异不足以证明 EP 会改变精度。BS=128 的矩阵不完整，也没有保存 OOM 的具体分配栈，因此不能定位到单一算子。"
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "body": "## 下一步\n\n- 对 BS=32/64、EP=1/2/4 各重复至少 3 次，报告均值和标准差。\n- 分阶段记录 shared expert、routed expert、AllReduce、attention、LM head 和采样耗时。\n- 同时记录每轮 active requests、每 rank routed token 数和峰值 NPU 内存。\n- 固定长度吞吐优先验证 BS=64/EP=1；GSM8K 场景优先验证 BS=64/EP=2。"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## 仍待确认\n\n- EP=2 在固定批量 BS=64 的下降是否可重复，还是单次运行抖动？\n- GSM8K 中实际平均 active batch 是多少，是否更接近 32 而不是 64？\n- BS=128 的 OOM 首次发生在启动、首轮 forward，还是长上下文后期？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-15T10:39:37.139Z",
+    "status": "ready",
+    "datasets": {
+      "fixed_speed_wide": [
+        {
+          "bs": 4,
+          "ep1": 736.3602,
+          "ep2": 762.2212,
+          "ep4": 688.605
+        },
+        {
+          "bs": 32,
+          "ep1": 1341.8081,
+          "ep2": 1530.2864,
+          "ep4": 1264.1509
+        },
+        {
+          "bs": 64,
+          "ep1": 1650.6461,
+          "ep2": 1356.7622,
+          "ep4": 1385.734
+        }
+      ],
+      "gsm_wide": [
+        {
+          "bs": 4,
+          "ep1": 487.3772,
+          "ep2": 530.9884,
+          "ep4": 510.2428
+        },
+        {
+          "bs": 32,
+          "ep1": 1094.5342,
+          "ep2": 1049.4144,
+          "ep4": 1012.9889
+        },
+        {
+          "bs": 64,
+          "ep1": 1109.4086,
+          "ep2": 1156.9225,
+          "ep4": 1083.6373
+        }
+      ],
+      "case_results": [
+        {
+          "sort_key": 401,
+          "bs": 4,
+          "ep": 1,
+          "moe_tp": 4,
+          "status": "success",
+          "bs_speed": 736.3602,
+          "gsm_throughput": 487.3772,
+          "gsm_accuracy": 0.84
+        },
+        {
+          "sort_key": 402,
+          "bs": 4,
+          "ep": 2,
+          "moe_tp": 2,
+          "status": "success",
+          "bs_speed": 762.2212,
+          "gsm_throughput": 530.9884,
+          "gsm_accuracy": 0.82
+        },
+        {
+          "sort_key": 404,
+          "bs": 4,
+          "ep": 4,
+          "moe_tp": 1,
+          "status": "success",
+          "bs_speed": 688.605,
+          "gsm_throughput": 510.2428,
+          "gsm_accuracy": 0.84
+        },
+        {
+          "sort_key": 3201,
+          "bs": 32,
+          "ep": 1,
+          "moe_tp": 4,
+          "status": "success",
+          "bs_speed": 1341.8081,
+          "gsm_throughput": 1094.5342,
+          "gsm_accuracy": 0.84
+        },
+        {
+          "sort_key": 3202,
+          "bs": 32,
+          "ep": 2,
+          "moe_tp": 2,
+          "status": "success",
+          "bs_speed": 1530.2864,
+          "gsm_throughput": 1049.4144,
+          "gsm_accuracy": 0.83
+        },
+        {
+          "sort_key": 3204,
+          "bs": 32,
+          "ep": 4,
+          "moe_tp": 1,
+          "status": "success",
+          "bs_speed": 1264.1509,
+          "gsm_throughput": 1012.9889,
+          "gsm_accuracy": 0.835
+        },
+        {
+          "sort_key": 6401,
+          "bs": 64,
+          "ep": 1,
+          "moe_tp": 4,
+          "status": "success",
+          "bs_speed": 1650.6461,
+          "gsm_throughput": 1109.4086,
+          "gsm_accuracy": 0.845
+        },
+        {
+          "sort_key": 6402,
+          "bs": 64,
+          "ep": 2,
+          "moe_tp": 2,
+          "status": "success",
+          "bs_speed": 1356.7622,
+          "gsm_throughput": 1156.9225,
+          "gsm_accuracy": 0.845
+        },
+        {
+          "sort_key": 6404,
+          "bs": 64,
+          "ep": 4,
+          "moe_tp": 1,
+          "status": "success",
+          "bs_speed": 1385.734,
+          "gsm_throughput": 1083.6373,
+          "gsm_accuracy": 0.855
+        },
+        {
+          "sort_key": 12802,
+          "bs": 128,
+          "ep": 2,
+          "moe_tp": 2,
+          "status": "failed / empty metrics",
+          "bs_speed": null,
+          "gsm_throughput": null,
+          "gsm_accuracy": null
+        },
+        {
+          "sort_key": 12804,
+          "bs": 128,
+          "ep": 4,
+          "moe_tp": 1,
+          "status": "failed / empty metrics",
+          "bs_speed": null,
+          "gsm_throughput": null,
+          "gsm_accuracy": null
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "benchmark_csv",
+      "label": "LLaDA2 mini 4-NPU EP benchmark CSV",
+      "path": "test/registered/dllm/llada2_gsm8k_ep_test_mini_0715_4NPUs.csv",
+      "query": {
+        "engine": "local_csv",
+        "language": "csv",
+        "description": "Matrix benchmark output for LLaDA2.1-mini BF16, TP=4, backend=none.",
+        "executed_at": "2026-07-15T10:39:37.139Z",
+        "filters": [
+          "model_size=mini",
+          "precision=bf16_ep",
+          "tp=4",
+          "dp=1",
+          "moe_a2a_backend=none",
+          "complete metric rows only in charts"
+        ],
+        "metric_definitions": [
+          "bs_speed = total completion tokens divided by the maximum end-to-end latency across responses in one batched /generate request.",
+          "gsm8k_output_throughput = total generated GSM8K output tokens divided by evaluation latency.",
+          "gsm8k_acc = exact-match accuracy over 200 GSM8K questions."
+        ],
+        "tables_used": [
+          "llada2_gsm8k_ep_test_mini_0715_4NPUs.csv"
+        ]
+      }
+    },
+    {
+      "id": "runtime_code",
+      "label": "LLaDA2 EP benchmark and runtime configuration",
+      "query": {
+        "engine": "local_source",
+        "language": "python/bash/yaml",
+        "description": "Runtime and test definitions used to interpret batch size, block size, max running requests, and EP/TP behavior.",
+        "executed_at": "2026-07-15T10:39:37.139Z",
+        "tables_used": [
+          "test_llada2_ascend_gsm8k_ep_bf16.py",
+          "joint_threshold.yaml",
+          "parallel_state.py"
+        ]
+      }
+    }
+  ]
+}
+

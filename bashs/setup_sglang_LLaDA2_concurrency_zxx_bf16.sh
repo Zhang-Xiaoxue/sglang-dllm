@@ -30,7 +30,7 @@ python -m sglang.launch_server \
 	--mem-fraction-static 0.90 \
         --max-running-requests 1 \
         --dllm-algorithm "JointThreshold" \
-	--dllm-algorithm-config /home/ma-user/work/z84301856/sglang-dllm/test/registered/dllm/joint_threshold.yaml \
+	--dllm-algorithm-config /data/home/z84301856/proj_sglang/sglang_dllm_own_0706/sglang-dllm/test/registered/dllm/joint_threshold.yaml \
         --enable-tokenizer-batch-encode \
 	--skip-server-warmup \
         --enable-cache-report \
@@ -59,7 +59,7 @@ python -m sglang.launch_server \
 # 	--mem-fraction-static 0.90 \
 #         --max-running-requests 1 \
 #         --dllm-algorithm "JointThreshold" \
-#         --dllm-algorithm-config /home/ma-user/work/z84301856/sglang-dllm/test/registered/dllm/joint_threshold.yaml \
+#         --dllm-algorithm-config /data/home/z84301856/proj_sglang/sglang_dllm_own_0706/sglang-dllm/test/registered/dllm/joint_threshold.yaml \
 #         --enable-tokenizer-batch-encode \
 # 	--skip-server-warmup \
 #         --enable-cache-report \

@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Dict, Optional, Union
 import torch
 import tqdm
 
+from sglang.srt.environ import envs
 from sglang.srt.distributed import get_tensor_model_parallel_rank
 from sglang.srt.distributed.parallel_state import graph_capture
 from sglang.srt.layers.dp_attention import (
@@ -81,6 +82,54 @@ from sglang.srt.utils import (
 # Suppress Dynamo warning about tracing through lru_cache-wrapped functions.
 warnings.filterwarnings("ignore", message=".*lru_cache.*", module="torch._dynamo")
 logger = logging.getLogger(__name__)
+
+
+def _debug_tensor_summary(
+    name: str, tensor: Optional[torch.Tensor], row_index: Optional[int] = None
+) -> str:
+    if tensor is None:
+        return f"{name}=None"
+    if not isinstance(tensor, torch.Tensor):
+        return f"{name}=type({type(tensor).__name__})"
+    try:
+        x = tensor.detach()
+        shape = tuple(x.shape)
+        if x.numel() == 0:
+            return f"{name}: shape={shape} dtype={x.dtype} empty=True"
+        xf = x.float()
+        finite = bool(torch.isfinite(xf).all().item())
+        summary = (
+            f"{name}: shape={shape} dtype={x.dtype} finite={finite} "
+            f"min={float(xf.min().item()):.6g} "
+            f"max={float(xf.max().item()):.6g} "
+            f"mean={float(xf.mean().item()):.6g} "
+            f"std={float(xf.std(unbiased=False).item()):.6g}"
+        )
+        if x.dim() >= 2 and x.shape[0] > 0 and x.shape[-1] > 0:
+            last = x.shape[0] - 1 if row_index is None else min(row_index, x.shape[0] - 1)
+            row0 = xf[0].reshape(-1)
+            row_last = xf[last].reshape(-1)
+            summary += (
+                f" row0_argmax={int(row0.argmax().item())} "
+                f"row0_max={float(row0.max().item()):.6g} "
+                f"row{last}_argmax={int(row_last.argmax().item())} "
+                f"row{last}_max={float(row_last.max().item()):.6g}"
+            )
+        return summary
+    except Exception as exc:  # pragma: no cover - debug aid only
+        return f"{name}: debug_failed={exc!r}"
+
+
+def _debug_tensor_sample(name: str, tensor: Optional[torch.Tensor], limit: int = 8) -> str:
+    if tensor is None:
+        return f"{name}=None"
+    if not isinstance(tensor, torch.Tensor):
+        return f"{name}=type({type(tensor).__name__})"
+    try:
+        x = tensor.detach().reshape(-1)[:limit].cpu().tolist()
+        return f"{name}[:{limit}]={x}"
+    except Exception as exc:  # pragma: no cover - debug aid only
+        return f"{name}: sample_failed={exc!r}"
 
 # Names of the static prefill input tensors a Breakable-backed prefill
 # runner owns. Each is a 1-D int64 tensor of length max_bs; captured
@@ -132,7 +181,11 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             logger, f"Capture cuda graph num tokens {self.capture_num_tokens}"
         )
 
-        self.capture_forward_mode = ForwardMode.EXTEND
+        self.capture_forward_mode = (
+            ForwardMode.DLLM_EXTEND
+            if model_runner.server_args.dllm_algorithm is not None
+            else ForwardMode.EXTEND
+        )
         self.capture_hidden_mode = CaptureHiddenMode.NULL
         # If returning hidden states is enabled, or if speculative prefill
         # needs aux hidden states (DFLASH), capture the FULL variant up front.
@@ -286,13 +339,20 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
         can spuriously track gradients.
         """
         forward_batch.dp_local_start_pos = forward_batch.dp_local_num_tokens = None
+        is_extend_in_batch = (
+            forward_batch.is_extend_in_batch or forward_batch.forward_mode.is_extend()
+        )
+        forward_batch.is_extend_in_batch = is_extend_in_batch
+        forward_batch.all_extend_in_batch = (
+            forward_batch.all_extend_in_batch or is_extend_in_batch
+        )
         set_dp_buffer_len(
             forward_batch.global_dp_buffer_len,
             num_tokens,
             forward_batch.dp_padding_mode.is_max_len(),
             forward_batch.global_num_tokens_cpu,
         )
-        set_is_extend_in_batch(False)
+        set_is_extend_in_batch(is_extend_in_batch)
 
         with forward_context(
             ForwardContext(attn_backend=self.model_runner.attn_backend)
@@ -391,15 +451,29 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             return False
         if forward_batch.capture_hidden_mode != self.capture_hidden_mode:
             return False
-        # BCG-with-captured-metadata under DP attention: every rank must
-        # have local tokens, and the batch must declare itself replayable.
-        # These gates are no-ops for non-DP / non-opt-in paths because
-        # global_num_tokens_cpu stays None.
+        if (
+            is_npu()
+            and forward_batch.forward_mode == ForwardMode.DLLM_EXTEND
+            and not envs.SGLANG_NPU_DLLM_DEEPEP_PREFILL_GRAPH.get()
+        ):
+            return False
+        # DP attention / DeepEP collectives need every DP rank to enter the
+        # same replay path. Sparse-DP batches fall back to eager.
         if self._has_inactive_dp_rank(forward_batch):
             return False
+        allow_npu_dllm_deepep_prefill_graph = (
+            is_npu()
+            and forward_batch.forward_mode == ForwardMode.DLLM_EXTEND
+            and envs.SGLANG_NPU_DLLM_DEEPEP_PREFILL_GRAPH.get()
+            and not isinstance(self.backend, BreakableCudaGraphBackend)
+        )
+        # DeepEP/MLP-sync prefill replay is only safe when the scheduler marks
+        # the batch graph-replayable. DLLM_EXTEND on NPU is still experimental
+        # and must explicitly opt in because graph replay used to produce bad logits.
         if (
             forward_batch.global_num_tokens_cpu is not None
             and not forward_batch.can_run_dp_breakable_cuda_graph
+            and not allow_npu_dllm_deepep_prefill_graph
         ):
             return False
         num_tokens = len(forward_batch.input_ids)
@@ -489,7 +563,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
 
         with torch.device(self.device):
             forward_batch = ForwardBatch(
-                forward_mode=ForwardMode.EXTEND,
+                forward_mode=self.capture_forward_mode,
                 batch_size=bs,
                 input_ids=_slot("input_ids"),
                 input_embeds=(
@@ -545,7 +619,9 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                 capture_hidden_mode=self.capture_hidden_mode,
                 num_token_non_padded=None,
                 num_token_non_padded_cpu=num_tokens,
-                global_forward_mode=ForwardMode.EXTEND,
+                global_forward_mode=self.capture_forward_mode,
+                is_extend_in_batch=self.capture_forward_mode.is_extend(),
+                all_extend_in_batch=self.capture_forward_mode.is_extend(),
                 lora_ids=None,
                 return_pooled_hidden_states=self.capture_return_pooled_hidden_states,
             )
@@ -633,6 +709,12 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
         self.raw_num_tokens = num_tokens
 
         bs = forward_batch.batch_size
+        forward_batch.is_extend_in_batch = (
+            forward_batch.is_extend_in_batch or forward_batch.forward_mode.is_extend()
+        )
+        forward_batch.all_extend_in_batch = (
+            forward_batch.all_extend_in_batch or forward_batch.is_extend_in_batch
+        )
 
         self.buffer_registry.fill_from(
             forward_batch,
@@ -724,6 +806,11 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             num_token_non_padded=forward_batch.num_token_non_padded,
             num_token_non_padded_cpu=forward_batch.num_token_non_padded_cpu,
             global_forward_mode=pcg_global_forward_mode,
+            is_extend_in_batch=forward_batch.is_extend_in_batch
+            or pcg_forward_mode.is_extend(),
+            all_extend_in_batch=forward_batch.all_extend_in_batch
+            or forward_batch.is_extend_in_batch
+            or pcg_forward_mode.is_extend(),
             lora_ids=forward_batch.lora_ids,
             sampling_info=forward_batch.sampling_info,
             mm_inputs=forward_batch.mm_inputs,
@@ -765,7 +852,35 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
     ) -> Union[LogitsProcessorOutput, PPProxyTensors, EmbeddingPoolerOutput]:
         with self.backend.replay_session():
             static_forward_batch = self.replay_prepare(forward_batch, **kwargs)
-
+            static_forward_batch.dp_local_start_pos = (
+                static_forward_batch.dp_local_num_tokens
+            ) = None
+            set_dp_buffer_len(
+                static_forward_batch.global_dp_buffer_len,
+                self._static_num_tokens,
+                static_forward_batch.dp_padding_mode.is_max_len(),
+                static_forward_batch.global_num_tokens_cpu,
+            )
+            set_is_extend_in_batch(
+                static_forward_batch.is_extend_in_batch
+                or static_forward_batch.forward_mode.is_extend()
+            )
+            if envs.SGLANG_NPU_DEEPEP_DEBUG_GRAPH_LOG.get():
+                count = getattr(self, "_debug_replay_log_count", 0)
+                if count < 8:
+                    log_info_on_rank0(
+                        logger,
+                        "Prefill graph replay debug: "
+                        f"forward_mode={static_forward_batch.forward_mode} "
+                        f"is_extend={static_forward_batch.forward_mode.is_extend()} "
+                        f"is_extend_in_batch={static_forward_batch.is_extend_in_batch} "
+                        f"raw_num_tokens={self.raw_num_tokens} "
+                        f"static_num_tokens={self._static_num_tokens} "
+                        f"global_num_tokens_cpu={static_forward_batch.global_num_tokens_cpu} "
+                        f"{_debug_tensor_sample('input_ids', static_forward_batch.input_ids)} "
+                        f"{_debug_tensor_sample('positions', static_forward_batch.positions)}",
+                    )
+                    self._debug_replay_log_count = count + 1
             if self.layer_model is not None:
                 # BCG path. The captured graph is a bs=1 replay of
                 # layer_model.forward. Monkey-patch layer_model.forward to
@@ -820,6 +935,26 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                         self._static_num_tokens, static_forward_batch, **kwargs
                     )
 
+            if (
+                envs.SGLANG_NPU_DEEPEP_DEBUG_GRAPH_LOG.get()
+                and isinstance(output, LogitsProcessorOutput)
+            ):
+                count = getattr(self, "_debug_output_log_count", 0)
+                if count < 8:
+                    logits = output.full_logits
+                    logits_name = "full_logits"
+                    if logits is None:
+                        logits = output.next_token_logits
+                        logits_name = "next_token_logits"
+                    log_info_on_rank0(
+                        logger,
+                        "Prefill graph logits debug: "
+                        f"raw_num_tokens={self.raw_num_tokens} "
+                        f"static_num_tokens={self._static_num_tokens} "
+                        f"{_debug_tensor_summary(logits_name, logits, self.raw_num_tokens - 1)}",
+                    )
+                    self._debug_output_log_count = count + 1
+
             if isinstance(output, LogitsProcessorOutput):
                 # Preserve mm_input_embeds for speculative decoding.
                 mm_input_embeds = None
@@ -829,10 +964,19 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                 ):
                     mm_input_embeds = output.mm_input_embeds[: self.raw_num_tokens]
                 return LogitsProcessorOutput(
-                    next_token_logits=output.next_token_logits[: self.raw_num_tokens],
+                    next_token_logits=(
+                        output.next_token_logits[: self.raw_num_tokens]
+                        if output.next_token_logits is not None
+                        else None
+                    ),
                     hidden_states=(
                         output.hidden_states[: self.raw_num_tokens]
                         if output.hidden_states is not None
+                        else None
+                    ),
+                    full_logits=(
+                        output.full_logits[: self.raw_num_tokens]
+                        if output.full_logits is not None
                         else None
                     ),
                     mm_input_embeds=mm_input_embeds,

@@ -1,8 +1,16 @@
 import csv
 import os
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+
+THIS_FILE = Path(__file__).resolve()
+REPO_ROOT = THIS_FILE.parents[3]
+PYTHON_DIR = REPO_ROOT / "python"
+if str(PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(PYTHON_DIR))
+os.environ["PYTHONPATH"] = f"{PYTHON_DIR}:{os.environ.get('PYTHONPATH', '')}"
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
@@ -15,7 +23,7 @@ from sglang.test.test_utils import (
     write_github_step_summary,
 )
 
-RESULT_DIR = Path(__file__).resolve().parent
+RESULT_DIR = THIS_FILE.parent
 DEFAULT_CSV_PATH = RESULT_DIR / "llada2_mini_ascend_results.csv"
 CSV_COLUMNS = [
     "run_name",
@@ -49,6 +57,15 @@ def _env_int(name, default):
     return int(_env(name, default))
 
 
+def _env_bool(name, default=False):
+    value = _env(name, "1" if default else "0").lower()
+    return value in ("1", "true", "yes", "on")
+
+
+def _env_list(name, default):
+    return _env(name, default).replace(",", " ").split()
+
+
 def _env_path(name, default):
     value = _env(name, default)
     if not value:
@@ -59,15 +76,33 @@ def _env_path(name, default):
     return str((RESULT_DIR / path).resolve())
 
 
-def _env_bool(name, default=False):
-    value = _env(name, "1" if default else "0").lower()
-    return value in ("1", "true", "yes", "on")
-
-
 def _append_optional_arg(args, flag, value):
     value = str(value)
     if value and value.lower() not in ("none", "null"):
         args.extend([flag, value])
+
+
+def _set_runtime_env(name, dllm_name, default=""):
+    value = _env(dllm_name, default)
+    if value:
+        os.environ[name] = value
+    else:
+        os.environ.pop(name, None)
+
+
+def _clear_debug_envs_unless_kept():
+    if _env_bool("KEEP_DEBUG_ENVS", False):
+        return
+    for name in (
+        "SGLANG_NPU_DEEPEP_DEBUG_GRAPH_LOG",
+        "SGLANG_NPU_DEEPEP_EAGER_POST_MOE_GRAPH",
+        "SGLANG_NPU_PIECEWISE_EAGER_GRAPH",
+        "SGLANG_NPU_PIECEWISE_EAGER_FROM_GRAPH",
+        "SGLANG_NPU_PIECEWISE_EAGER_LAST_GRAPH",
+        "SGLANG_NPU_PIECEWISE_SYNC_REPLAY",
+        "SGLANG_NPU_DEEPEP_DISABLE_MOE_SPLIT",
+    ):
+        os.environ.pop(name, None)
 
 
 def _append_csv_row(row):
@@ -91,9 +126,10 @@ def _metric(metrics, key):
     return value
 
 
+
 class TestLLaDA2(CustomTestCase):
     result_label = "bf16_ep"
-    default_model_size = "flash"
+    default_model_size = "mini"
     model_paths = {
         "mini": "/data/public_models/LLaDA/LLaDA2.1-mini",
         "flash": "/data/public_models/LLaDA/LLaDA2.1-flash",
@@ -101,19 +137,46 @@ class TestLLaDA2(CustomTestCase):
     default_tp = "4"
     default_ep = "4"
     default_dp = "1"
-    default_bs = 4
+    default_bs = 1
     default_moe_a2a_backend = "deepep"
     quantization = ""
 
     @classmethod
     def setUpClass(cls):
-        os.environ.setdefault("HCCL_BUFFSIZE", _env("HCCL_BUFFSIZE", "1024"))
-        os.environ["SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK"] = _env("DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK", "256")
-        os.environ["SGLANG_DEEPEP_BF16_DISPATCH"] = _env("DEEPEP_BF16_DISPATCH", "1")
-        os.environ["SGLANG_DEBUG_GRAPH_CAN_RUN"] = _env("DEBUG_GRAPH_CAN_RUN", "0")
+        os.environ.setdefault(
+            "ASCEND_RT_VISIBLE_DEVICES",
+            _env("ASCEND_RT_VISIBLE_DEVICES", "1,2,3,5"),
+        )
+        _set_runtime_env("HCCL_BUFFSIZE", "HCCL_BUFFSIZE", "1024")
+        _set_runtime_env("SGLANG_DEBUG_GRAPH_CAN_RUN", "DEBUG_GRAPH_CAN_RUN", "0")
+        _set_runtime_env(
+            "SGLANG_NPU_DLLM_DEEPEP_PREFILL_GRAPH",
+            "NPU_DLLM_DEEPEP_PREFILL_GRAPH",
+            "1",
+        )
+        _set_runtime_env(
+            "SGLANG_NPU_PIECEWISE_STATIC_INPUT_COPY",
+            "NPU_PIECEWISE_STATIC_INPUT_COPY",
+            "1",
+        )
+        _set_runtime_env(
+            "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK",
+            "DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK",
+            "",
+        )
+        _set_runtime_env(
+            "SGLANG_DEEPEP_BF16_DISPATCH",
+            "DEEPEP_BF16_DISPATCH",
+            "",
+        )
+        _clear_debug_envs_unless_kept()
+
         cls.model_size = _env("MODEL_SIZE", cls.default_model_size).lower()
         if cls.model_size not in cls.model_paths:
-            raise ValueError(f"Unsupported SGLANG_DLLM_MODEL_SIZE={cls.model_size!r}; use mini or flash")
+            raise ValueError(
+                f"Unsupported SGLANG_DLLM_MODEL_SIZE={cls.model_size!r}; "
+                "use mini or flash"
+            )
         cls.model = _env("MODEL", cls.model_paths[cls.model_size])
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.bs = _env_int("BS", cls.default_bs)
@@ -121,7 +184,9 @@ class TestLLaDA2(CustomTestCase):
         cls.ep = _env("EP", cls.default_ep)
         cls.dp = _env("DP", cls.default_dp)
         cls.moe_dp_size = _env("MOE_DP_SIZE", "1")
-        cls.moe_a2a_backend = _env("MOE_A2A_BACKEND", cls.default_moe_a2a_backend)
+        cls.moe_a2a_backend = _env(
+            "MOE_A2A_BACKEND", cls.default_moe_a2a_backend
+        )
         cls.max_running_requests = _env("MAX_RUNNING_REQUESTS", cls.bs)
         cls.run_name = _env("RUN_NAME", cls.result_label)
         cls.bs_metrics = None
@@ -129,35 +194,72 @@ class TestLLaDA2(CustomTestCase):
 
         other_args = [
             "--trust-remote-code",
-            "--device", "npu",
-            "--dtype", "bfloat16",
+            "--device",
+            "npu",
+            "--dtype",
+            "bfloat16",
             "--disable-radix-cache",
-            "--mem-fraction-static", _env("MEM_FRACTION_STATIC", "0.90"),
-            "--max-running-requests", str(cls.max_running_requests),
-            "--attention-backend", "ascend",
-            "--tp", cls.tp,
-            "--ep", cls.ep,
-            "--dp-size", cls.dp,
-            "--moe-dp-size", cls.moe_dp_size,
+            "--mem-fraction-static",
+            _env("MEM_FRACTION_STATIC", "0.90"),
+            "--max-running-requests",
+            str(cls.max_running_requests),
+            "--attention-backend",
+            "ascend",
+            "--tp",
+            cls.tp,
+            "--ep",
+            cls.ep,
+            "--dp-size",
+            cls.dp,
+            "--moe-dp-size",
+            cls.moe_dp_size,
         ]
         _append_optional_arg(other_args, "--moe-a2a-backend", cls.moe_a2a_backend)
-        _append_optional_arg(other_args, "--deepep-mode", _env("DEEPEP_MODE", "auto"))
-        _append_optional_arg(other_args, "--cuda-graph-max-bs", _env("CUDA_GRAPH_MAX_BS", cls.bs))
-        if _env_bool("ENABLE_PIECEWISE_GRAPH", True):
-            other_args.extend(["--piecewise-cuda-graph-compiler", _env("PIECEWISE_CUDA_GRAPH_COMPILER", "eager")])
-            tokens = _env("PIECEWISE_CUDA_GRAPH_TOKENS", "32,64,96,128").replace(",", " ").split()
+        _append_optional_arg(
+            other_args,
+            "--deepep-mode",
+            _env("DEEPEP_MODE", "auto" if cls.moe_a2a_backend == "deepep" else ""),
+        )
+        if _env_bool("ENABLE_PREFILL_GRAPH", cls.moe_a2a_backend == "deepep"):
+            _append_optional_arg(
+                other_args,
+                "--cuda-graph-backend-prefill",
+                _env("CUDA_GRAPH_BACKEND_PREFILL", "tc_piecewise"),
+            )
+            prefill_bs = _env_list("CUDA_GRAPH_BS_PREFILL", "32")
+            if prefill_bs:
+                other_args.extend(["--cuda-graph-bs-prefill", *prefill_bs])
+            _append_optional_arg(
+                other_args,
+                "--cuda-graph-tc-compiler",
+                _env("CUDA_GRAPH_TC_COMPILER", "eager"),
+            )
+        if _env_bool("ENABLE_PIECEWISE_GRAPH", False):
+            other_args.extend(
+                [
+                    "--piecewise-cuda-graph-compiler",
+                    _env("PIECEWISE_CUDA_GRAPH_COMPILER", "eager"),
+                ]
+            )
+            tokens = _env_list("PIECEWISE_CUDA_GRAPH_TOKENS", "32,64,96,128")
             other_args.extend(["--piecewise-cuda-graph-tokens", *tokens])
             other_args.append("--enforce-piecewise-cuda-graph")
-        other_args.extend([
-            "--dllm-algorithm", _env("ALGORITHM", "JointThreshold"),
-            "--dllm-algorithm-config", _env_path("ALGORITHM_CONFIG", "joint_threshold.yaml"),
-        ])
+        other_args.extend(
+            [
+                "--dllm-algorithm",
+                _env("ALGORITHM", "JointThreshold"),
+                "--dllm-algorithm-config",
+                _env_path("ALGORITHM_CONFIG", "joint_threshold.yaml"),
+            ]
+        )
 
+        print("LLaDA2 EP bf16 launch args:", " ".join(map(str, other_args)))
         cls.process = popen_launch_server(
             cls.model,
             cls.base_url,
             timeout=_env_int("SERVER_TIMEOUT", 3600),
             other_args=other_args,
+            device="npu",
         )
 
     @classmethod
@@ -190,7 +292,9 @@ class TestLLaDA2(CustomTestCase):
                 "gsm8k_acc": _metric(cls.gsm8k_metrics, "accuracy"),
                 "gsm8k_invalid": _metric(cls.gsm8k_metrics, "invalid"),
                 "gsm8k_latency": _metric(cls.gsm8k_metrics, "latency"),
-                "gsm8k_output_throughput": _metric(cls.gsm8k_metrics, "output_throughput"),
+                "gsm8k_output_throughput": _metric(
+                    cls.gsm8k_metrics, "output_throughput"
+                ),
             }
         )
         print(f"LLaDA2 mini Ascend CSV updated: {csv_path}")
@@ -211,7 +315,8 @@ class TestLLaDA2(CustomTestCase):
 
         self.assertGreater(metrics["accuracy"], float(_env("MIN_GSM8K_ACC", 0.68)))
         self.assertGreater(
-            metrics["output_throughput"], float(_env("MIN_GSM8K_OUTPUT_THROUGHPUT", 10))
+            metrics["output_throughput"],
+            float(_env("MIN_GSM8K_OUTPUT_THROUGHPUT", 10)),
         )
 
     def test_bs_speed(self):

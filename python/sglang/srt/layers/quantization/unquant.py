@@ -691,7 +691,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
         num_tokens = x.shape[0]
         topk_weights = topk_weights.to(x.dtype)
         topk_ids = topk_ids.to(torch.int32)
-        num_experts = layer.num_experts
+        num_experts = layer.num_local_experts
+        invalid_expert_mask = (topk_ids < 0) | (topk_ids >= num_experts)
+        topk_ids = torch.where(invalid_expert_mask, torch.zeros_like(topk_ids), topk_ids)
+        topk_weights = torch.where(
+            invalid_expert_mask, torch.zeros_like(topk_weights), topk_weights
+        )
         top_k = layer.top_k or topk_ids.shape[1]  # in case layer.top_k is not set
 
         hidden_states, expanded_row_idx, expert_tokens, _ = (

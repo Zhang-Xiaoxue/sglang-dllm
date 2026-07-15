@@ -10,6 +10,9 @@ from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.dp_attention import get_is_extend_in_batch
+from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
+    get_tc_piecewise_forward_context,
+)
 from sglang.srt.layers.moe.token_dispatcher.base import (
     BaseDispatcher,
     BaseDispatcherConfig,
@@ -928,8 +931,29 @@ class DeepEPDispatcher(BaseDispatcher):
         return self._get_impl().combine_b(*inner_state)
 
     def _get_impl(self) -> _DeepEPDispatcherImplBase:
+        source = "global"
         is_extend_in_batch = get_is_extend_in_batch()
+        forward_context = get_tc_piecewise_forward_context()
+        if forward_context is not None and forward_context.forward_batch is not None:
+            forward_batch = forward_context.forward_batch
+            is_extend_in_batch = (
+                forward_batch.is_extend_in_batch
+                or forward_batch.forward_mode.is_extend()
+            )
+            source = "tc_piecewise_forward_batch"
         resolved_deepep_mode = self.deepep_mode.resolve(is_extend_in_batch)
+        if envs.SGLANG_NPU_DEEPEP_DEBUG_GRAPH_LOG.get():
+            count = getattr(self, "_debug_mode_log_count", 0)
+            if count < 64:
+                logger.warning(
+                    "DeepEP graph debug: stage=%s source=%s is_extend_in_batch=%s resolved_mode=%s configured_mode=%s",
+                    self._stage,
+                    source,
+                    is_extend_in_batch,
+                    resolved_deepep_mode,
+                    self.deepep_mode,
+                )
+                self._debug_mode_log_count = count + 1
         if resolved_deepep_mode == DeepEPMode.NORMAL:
             return self._normal_dispatcher
         elif resolved_deepep_mode == DeepEPMode.LOW_LATENCY:
