@@ -1,0 +1,33 @@
+{
+  "expected_cases": 80,
+  "recorded_cases": 80,
+  "complete_cases": 76,
+  "incomplete_cases": 4,
+  "missing_expected_keys": [],
+  "unexpected_keys": [],
+  "accuracy_by_ep": {
+    "1": 0.8245,
+    "2": 0.824318,
+    "4": 0.824375,
+    "8": 0.826875
+  },
+  "chart_map": [
+    {
+      "section": "BS=128 后吞吐进入平台区",
+      "chart": "best_gsm_by_bs",
+      "family": "comparison",
+      "claim": "GSM8K throughput plateaus between BS=128 and BS=256."
+    },
+    {
+      "section": "高并发下 EP=8 明显过度切分",
+      "chart": "tp8_high_bs_ep",
+      "family": "comparison",
+      "claim": "EP=8 is not the best TP=8 configuration at BS=64/128/256."
+    }
+  ],
+  "omissions": [
+    "No causal claim: no profiler traces or repeated runs are available.",
+    "No time-series chart: BS is a configuration axis, not time.",
+    "Failure root causes are not classified because the CSV has no exit codes or log paths."
+  ]
+}

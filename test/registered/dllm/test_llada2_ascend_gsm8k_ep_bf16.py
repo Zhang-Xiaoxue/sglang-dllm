@@ -147,7 +147,7 @@ class TestLLaDA2(CustomTestCase):
             "ASCEND_RT_VISIBLE_DEVICES",
             _env("ASCEND_RT_VISIBLE_DEVICES", "1,2,3,5"),
         )
-        _set_runtime_env("HCCL_BUFFSIZE", "HCCL_BUFFSIZE", "1024")
+        # _set_runtime_env("HCCL_BUFFSIZE", "HCCL_BUFFSIZE", "1024")
         _set_runtime_env("SGLANG_DEBUG_GRAPH_CAN_RUN", "DEBUG_GRAPH_CAN_RUN", "0")
         _set_runtime_env(
             "SGLANG_NPU_DLLM_DEEPEP_PREFILL_GRAPH",

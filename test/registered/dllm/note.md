@@ -1,0 +1,1 @@
+llada2_gsm8k_ep_test_mini_0716_zxx_bak_0p85.csv 中， bs<128的都是MEM_FRACTION=0.85, bs=128的是MEM_FRACTION=0.8，
