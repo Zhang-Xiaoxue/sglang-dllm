@@ -30,9 +30,25 @@ class DeviceTimer:
                 break
 
             self._intervals.popleft()
-            elapsed = interval.elapsed_time() / 1000.0
-            for reporter in self._reporters:
-                reporter(t=elapsed, **interval.metadata)
+            self._report_interval(interval)
+
+    def _report_interval(self, interval: "_TimingInterval"):
+        elapsed = interval.elapsed_time() / 1000.0
+        for reporter in self._reporters:
+            reporter(t=elapsed, **interval.metadata)
+
+    def flush(self):
+        """Wait for the newest interval and report all completed intervals."""
+        if not self._intervals:
+            return 0
+        self._intervals[-1].end_event.synchronize()
+        # The latest event is ordered after all earlier events on the same stream.
+        # Some NPU event implementations still return False from query() after a
+        # successful synchronize(), so a forced flush must not query again.
+        num_flushed = len(self._intervals)
+        while self._intervals:
+            self._report_interval(self._intervals.popleft())
+        return num_flushed
 
 
 class GapTimer(DeviceTimer):

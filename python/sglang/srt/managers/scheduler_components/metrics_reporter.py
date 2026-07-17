@@ -166,7 +166,13 @@ class SchedulerMetricsReporter:
             def _wrap_execution_reporter(**kwargs):
                 self._device_timer_window_gpu_time += kwargs["t"]
                 if self.enable_metrics:
+                    dllm_mode = kwargs.pop("dllm_mode", None)
                     self.metrics_collector.increment_forward_execution_seconds(**kwargs)
+                    if dllm_mode is not None:
+                        self.metrics_collector.increment_dllm_forward_execution(
+                            mode=dllm_mode,
+                            t=kwargs["t"],
+                        )
 
             self.forward_pass_device_timer = DeviceTimer(
                 reporter=_wrap_execution_reporter,
@@ -1007,6 +1013,11 @@ class SchedulerMetricsReporter:
             >= self.scheduler.server_args.decode_log_interval
         ):
             self._device_timer_window_batch_count = 0
+
+    def flush_device_timer(self):
+        if ENABLE_METRICS_DEVICE_TIMER:
+            return self.forward_pass_device_timer.flush()
+        return 0
 
     def reset_device_timer_window(self):
         if ENABLE_METRICS_DEVICE_TIMER:

@@ -883,6 +883,22 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
             ),
             labelnames=list(labels.keys()) + ["category"],
         )
+        self.dllm_forward_execution_seconds_total = Counter(
+            name="sglang:dllm_forward_execution_seconds_total",
+            documentation=(
+                "Total device time for diffusion LLM forward passes, split by "
+                "graph_replay, prefill_graph, and eager mode."
+            ),
+            labelnames=list(labels.keys()) + ["mode"],
+        )
+        self.dllm_forward_execution_passes_total = Counter(
+            name="sglang:dllm_forward_execution_passes_total",
+            documentation=(
+                "Total number of device-timed diffusion LLM forward passes, "
+                "split by graph_replay, prefill_graph, and eager mode."
+            ),
+            labelnames=list(labels.keys()) + ["mode"],
+        )
         self.estimated_flops_per_gpu_total = Counter(
             name="sglang:estimated_flops_per_gpu_total",
             documentation=(
@@ -1236,6 +1252,14 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
                 category=category,
                 **dp_cooperation_info.to_labels(),
             ).inc(t)
+
+    def increment_dllm_forward_execution(self, mode: str, t: float):
+        self.dllm_forward_execution_seconds_total.labels(
+            **self.labels, mode=mode
+        ).inc(t)
+        self.dllm_forward_execution_passes_total.labels(
+            **self.labels, mode=mode
+        ).inc(1)
 
     def increment_estimated_perf(
         self,

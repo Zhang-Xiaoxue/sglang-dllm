@@ -290,3 +290,7 @@ results/
 kernel_meta/
 
 extra-info/
+**/logs
+**/profiles
+logs
+profiles

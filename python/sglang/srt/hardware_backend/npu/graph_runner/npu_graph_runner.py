@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional, Union
 
@@ -202,6 +202,22 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
         pass
 
     def replay(
+        self,
+        forward_batch: ForwardBatch,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+    ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
+        timer_metadata = {"category": forward_batch.forward_mode.name.lower()}
+        if forward_batch.forward_mode.is_dllm_extend():
+            timer_metadata["dllm_mode"] = "graph_replay"
+        timer_ctx = (
+            self.model_runner.device_timer.wrap(metadata=timer_metadata)
+            if self.model_runner.device_timer
+            else nullcontext()
+        )
+        with timer_ctx:
+            return self._replay_impl(forward_batch, pp_proxy_tensors)
+
+    def _replay_impl(
         self,
         forward_batch: ForwardBatch,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,

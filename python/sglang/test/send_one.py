@@ -12,6 +12,7 @@ import argparse
 import dataclasses
 import json
 import random
+import time
 from typing import Optional
 
 import requests
@@ -31,6 +32,8 @@ class BenchArgs:
     seed: Optional[int] = None
     temperature: float = 0.0
     max_new_tokens: int = 512
+    min_new_tokens: int = 0
+    ignore_eos: bool = False
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
     json: bool = False
@@ -46,6 +49,7 @@ class BenchArgs:
     profile_steps: int = 5
     profile_by_stage: bool = False
     profile_prefix: Optional[str] = None
+    profile_output_dir: Optional[str] = None
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -78,6 +82,14 @@ class BenchArgs:
             "--max-new-tokens", type=int, default=BenchArgs.max_new_tokens
         )
         parser.add_argument(
+            "--min-new-tokens", type=int, default=BenchArgs.min_new_tokens
+        )
+        parser.add_argument(
+            "--ignore-eos",
+            action=argparse.BooleanOptionalAction,
+            default=BenchArgs.ignore_eos,
+        )
+        parser.add_argument(
             "--frequency-penalty", type=float, default=BenchArgs.frequency_penalty
         )
         parser.add_argument(
@@ -98,6 +110,9 @@ class BenchArgs:
         parser.add_argument(
             "--profile-prefix", type=str, default=BenchArgs.profile_prefix
         )
+        parser.add_argument(
+            "--profile-output-dir", type=str, default=BenchArgs.profile_output_dir
+        )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
@@ -110,26 +125,66 @@ def send_one_prompt(
     label: Optional[str] = None,
     print_output: bool = True,
     return_metrics: bool = False,
+    input_ids: Optional[list[int] | list[list[int]]] = None,
+    prompts: Optional[list[str]] = None,
 ):
     base_url = f"http://{args.host}:{args.port}"
 
     # Construct the input
-    if args.random_input_len is not None:
+    if input_ids is not None and prompts is not None:
+        raise ValueError("input_ids and prompts are mutually exclusive")
+
+    submitted_input_tokens_per_request = []
+    if input_ids is not None:
+        if args.batch_size == 1:
+            if input_ids and isinstance(input_ids[0], (list, tuple)):
+                if len(input_ids) != 1:
+                    raise ValueError(
+                        f"Expected one input_ids item, got {len(input_ids)}"
+                    )
+                request_input_ids = list(input_ids[0])
+            else:
+                request_input_ids = list(input_ids)
+            submitted_input_tokens_per_request = [len(request_input_ids)]
+        else:
+            if len(input_ids) != args.batch_size or not all(
+                isinstance(item, (list, tuple)) for item in input_ids
+            ):
+                raise ValueError(
+                    f"Expected {args.batch_size} input_ids items for the batch"
+                )
+            request_input_ids = [list(item) for item in input_ids]
+            submitted_input_tokens_per_request = [
+                len(item) for item in request_input_ids
+            ]
+        prompt = None
+    elif prompts is not None:
+        if len(prompts) != args.batch_size:
+            raise ValueError(
+                f"Expected {args.batch_size} prompts, got {len(prompts)}"
+            )
+        request_input_ids = None
+        prompt = prompts[0] if args.batch_size == 1 else list(prompts)
+    elif args.random_input_len is not None:
         # Generate random input ids within the vocab size
         n = args.random_input_len
         v = args.random_input_vocab_size
+        rng = random.Random(args.seed)
         if args.batch_size == 1:
-            input_ids = random.choices(range(v), k=n)
+            request_input_ids = rng.choices(range(v), k=n)
+            submitted_input_tokens_per_request = [n]
         else:
             if args.different_prompts:
-                input_ids = [
-                    random.choices(range(v), k=n) for _ in range(args.batch_size)
+                request_input_ids = [
+                    rng.choices(range(v), k=n) for _ in range(args.batch_size)
                 ]
             else:
-                input_ids = [random.choices(range(v), k=n)] * args.batch_size
+                request_input_ids = [rng.choices(range(v), k=n)] * args.batch_size
+            submitted_input_tokens_per_request = [n] * args.batch_size
+        prompt = None
     else:
         # Use the user inputs
-        input_ids = None
+        request_input_ids = None
         if args.batch_size == 1:
             prompt = args.prompt
         else:
@@ -174,12 +229,18 @@ def send_one_prompt(
         json_schema = None
 
     json_data = {
-        **({"input_ids": input_ids} if input_ids is not None else {"text": prompt}),
+        **(
+            {"input_ids": request_input_ids}
+            if request_input_ids is not None
+            else {"text": prompt}
+        ),
         "image_data": image_data,
         "sampling_params": {
             "sampling_seed": args.seed,
             "temperature": args.temperature,
             "max_new_tokens": args.max_new_tokens,
+            "min_new_tokens": args.min_new_tokens,
+            "ignore_eos": args.ignore_eos,
             "frequency_penalty": args.frequency_penalty,
             "presence_penalty": args.presence_penalty,
             "json_schema": json_schema,
@@ -190,17 +251,20 @@ def send_one_prompt(
     }
 
     # Run profiler if requested
+    profile_dir = None
     if args.profile:
         print(f"Running profiler with {args.profile_steps} steps...")
-        run_profile(
+        profile_dir = run_profile(
             url=base_url,
             num_steps=args.profile_steps,
             activities=["CPU", "GPU"],
+            output_dir=args.profile_output_dir,
             profile_by_stage=args.profile_by_stage,
             profile_prefix=args.profile_prefix,
         )
 
     # Send the request
+    request_start = time.perf_counter()
     response = requests.post(
         f"{base_url}/generate",
         json=json_data,
@@ -220,6 +284,7 @@ def send_one_prompt(
                 print(chunk_str, end="", flush=True)
     else:
         ret = response.json()
+    batch_wall_latency = time.perf_counter() - request_start
 
     raw_ret = ret
     if args.batch_size > 1 and isinstance(ret, list):
@@ -228,14 +293,35 @@ def send_one_prompt(
     if response.status_code != 200:
         print(ret)
         if return_metrics:
-            return {"latency": 0, "tokens": 0, "acc_length": 0, "speed": 0}
+            return {
+                "latency": 0,
+                "batch_wall_latency": batch_wall_latency,
+                "tokens": 0,
+                "acc_length": 0,
+                "speed": 0,
+                "batch_wall_speed": 0,
+                "fixed_output_length_ok": False,
+                "submitted_input_tokens_per_request": (
+                    submitted_input_tokens_per_request
+                ),
+                "prompt_tokens_per_request": [],
+                "profile_dir": profile_dir,
+            }
         return 0, 0
 
     # Print results
     if return_metrics and isinstance(raw_ret, list):
         meta_infos = [item["meta_info"] for item in raw_ret]
+        prompt_tokens_per_request = [
+            meta_info["prompt_tokens"]
+            for meta_info in meta_infos
+            if "prompt_tokens" in meta_info
+        ]
+        completion_tokens_per_request = [
+            meta_info["completion_tokens"] for meta_info in meta_infos
+        ]
         latency = max(meta_info["e2e_latency"] for meta_info in meta_infos)
-        tokens = sum(meta_info["completion_tokens"] for meta_info in meta_infos)
+        tokens = sum(completion_tokens_per_request)
         acc_lengths = []
         for meta_info in meta_infos:
             spec_verify_ct = meta_info.get("spec_verify_ct", 0)
@@ -245,6 +331,12 @@ def send_one_prompt(
                 acc_lengths.append(1.0)
         acc_length = sum(acc_lengths) / len(acc_lengths)
     else:
+        prompt_tokens_per_request = (
+            [ret["meta_info"]["prompt_tokens"]]
+            if "prompt_tokens" in ret["meta_info"]
+            else []
+        )
+        completion_tokens_per_request = [ret["meta_info"]["completion_tokens"]]
         if "spec_verify_ct" in ret["meta_info"] and ret["meta_info"]["spec_verify_ct"] > 0:
             acc_length = (
                 ret["meta_info"]["completion_tokens"]
@@ -257,6 +349,14 @@ def send_one_prompt(
         tokens = ret["meta_info"]["completion_tokens"]
 
     speed = tokens / latency if latency > 0 else 0
+    batch_wall_speed = tokens / batch_wall_latency if batch_wall_latency > 0 else 0
+    fixed_output_length_ok = (
+        len(completion_tokens_per_request) == args.batch_size
+        and all(
+            completion_tokens == args.max_new_tokens
+            for completion_tokens in completion_tokens_per_request
+        )
+    )
 
     if not args.stream and print_output:
         print(ret["text"])
@@ -264,17 +364,47 @@ def send_one_prompt(
     print()
     if label is not None:
         print(label)
-    headers = ["Latency (s)", "Tokens", "Acc Length", "Speed (token/s)"]
-    rows = [[f"{latency:.3f}", f"{tokens}", f"{acc_length:.3f}", f"{speed:.2f}"]]
+    headers = [
+        "Server E2E (s)",
+        "Batch Wall (s)",
+        "Tokens",
+        "Output Range",
+        "Acc Length",
+        "Server E2E (token/s)",
+        "Batch Wall (token/s)",
+    ]
+    output_range = (
+        f"{min(completion_tokens_per_request)}-{max(completion_tokens_per_request)}"
+    )
+    rows = [
+        [
+            f"{latency:.3f}",
+            f"{batch_wall_latency:.3f}",
+            f"{tokens}",
+            output_range,
+            f"{acc_length:.3f}",
+            f"{speed:.2f}",
+            f"{batch_wall_speed:.2f}",
+        ]
+    ]
     msg = tabulate.tabulate(rows, headers=headers, tablefmt="pretty")
     print(msg)
 
     if return_metrics:
         return {
             "latency": latency,
+            "batch_wall_latency": batch_wall_latency,
             "tokens": tokens,
+            "submitted_input_tokens_per_request": (
+                submitted_input_tokens_per_request
+            ),
+            "prompt_tokens_per_request": prompt_tokens_per_request,
+            "completion_tokens_per_request": completion_tokens_per_request,
+            "fixed_output_length_ok": fixed_output_length_ok,
             "acc_length": acc_length,
             "speed": speed,
+            "batch_wall_speed": batch_wall_speed,
+            "profile_dir": profile_dir,
         }
 
     return acc_length, speed

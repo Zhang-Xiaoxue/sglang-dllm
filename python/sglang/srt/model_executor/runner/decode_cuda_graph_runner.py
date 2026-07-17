@@ -1051,10 +1051,11 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         forward_batch: ForwardBatch,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
+        timer_metadata = {"category": forward_batch.forward_mode.name.lower()}
+        if forward_batch.forward_mode.is_dllm_extend():
+            timer_metadata["dllm_mode"] = "graph_replay"
         timer_ctx = (
-            self.model_runner.device_timer.wrap(
-                metadata={"category": forward_batch.forward_mode.name.lower()}
-            )
+            self.model_runner.device_timer.wrap(metadata=timer_metadata)
             if self.model_runner.device_timer
             else contextlib.nullcontext()
         )

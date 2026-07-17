@@ -3216,6 +3216,11 @@ class Scheduler(
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
     ):
+        is_device_timer_barrier = any(
+            is_health_check_generate_req(req)
+            or not getattr(req, "log_metrics", True)
+            for req in batch.reqs
+        )
         self.publish_load_snapshot(force=batch.forward_mode.is_extend())
 
         if batch.forward_mode.is_decode():
@@ -3241,6 +3246,9 @@ class Scheduler(
         self._maybe_clear_mm_inputs(batch)
         self.maybe_send_health_check_signal()
         self.metrics_reporter.update_device_timer()
+        if is_device_timer_barrier:
+            # Tests use /health_generate as an out-of-band metrics barrier.
+            self.metrics_reporter.flush_device_timer()
 
     def maybe_send_health_check_signal(self):
         if self.return_health_check_ipcs:

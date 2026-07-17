@@ -3285,8 +3285,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             # TODO: device_timer.wrap is too broad here — it also includes
             # replay_prepare time. Move timing into the prefill cuda graph
             # runner to capture only the model.forward part.
+            timer_metadata = {"category": "extend"}
+            if forward_batch.forward_mode.is_dllm_extend():
+                timer_metadata["dllm_mode"] = "prefill_graph"
             ctx = (
-                self.device_timer.wrap(metadata={"category": "extend"})
+                self.device_timer.wrap(metadata=timer_metadata)
                 if self.device_timer
                 else contextlib.nullcontext()
             )
@@ -3305,8 +3308,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 self.model.prepare_forward_batch(forward_batch)
             self.attn_backend.init_forward_metadata(forward_batch)
 
+        timer_metadata = {"category": "extend"}
+        if forward_batch.forward_mode.is_dllm_extend():
+            timer_metadata["dllm_mode"] = "eager"
         ctx = (
-            self.device_timer.wrap(metadata={"category": "extend"})
+            self.device_timer.wrap(metadata=timer_metadata)
             if self.device_timer
             else contextlib.nullcontext()
         )
