@@ -286,7 +286,10 @@ artifacts/
 
 **/kernel_meta
 **/results
+**/profiles
 results/
 kernel_meta/
 
 extra-info/
+
+logs/
