@@ -1,3 +1,4 @@
+import logging
 import math
 
 import numpy as np
@@ -6,9 +7,14 @@ import torch.nn.functional as F
 
 from sglang.srt.dllm.algorithm.base import DllmAlgorithm
 from sglang.srt.dllm.config import DllmConfig
+from sglang.srt.environ import envs
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.model_runner import ModelRunner
+
+
+logger = logging.getLogger(__name__)
+LOG_FORWARD_ITERS = envs.SGLANG_LOG_FORWARD_ITERS.get()
 
 
 def joint_threshold_update_step_vectorized(
@@ -126,10 +132,51 @@ class JointThreshold(DllmAlgorithm):
     ) -> tuple[LogitsProcessorOutput | torch.Tensor, torch.Tensor | None, bool]:
         batch_size = forward_batch.batch_size
         device = forward_batch.input_ids.device
+        model_forward_count = 0
+        sync_dp_iterations = (
+            model_runner.server_args.enable_dp_attention and model_runner.dp_size > 1
+        )
+        dp_active_flag = (
+            torch.zeros((), dtype=torch.int32, device=device)
+            if sync_dp_iterations
+            else None
+        )
+
+        def any_dp_rank_active(local_active: bool) -> bool:
+            if not sync_dp_iterations:
+                return local_active
+            dp_active_flag.fill_(int(local_active))
+            torch.distributed.all_reduce(
+                dp_active_flag,
+                op=torch.distributed.ReduceOp.MAX,
+                group=model_runner.tp_group.device_group,
+            )
+            return bool(dp_active_flag.item())
 
         mask_index = forward_batch.input_ids == self.mask_id
-        if not mask_index.any():
+        local_has_mask = bool(mask_index.any())
+        if not local_has_mask and not sync_dp_iterations:
             out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
+            model_forward_count += 1
+            if LOG_FORWARD_ITERS:
+                logger.info(
+                    "JointThreshold model forwards: count=%d loop_iterations=0 "
+                    "extra_forward=False batch_size=%d has_mask=False",
+                    model_forward_count,
+                    batch_size,
+                )
+            return out.logits_output, [], out.can_run_graph
+
+        if sync_dp_iterations and not any_dp_rank_active(local_has_mask):
+            out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
+            model_forward_count += 1
+            if LOG_FORWARD_ITERS:
+                logger.info(
+                    "JointThreshold model forwards: count=%d loop_iterations=0 "
+                    "extra_forward=False batch_size=%d has_mask=False dp_sync=True",
+                    model_forward_count,
+                    batch_size,
+                )
             return out.logits_output, [], out.can_run_graph
 
         # ---------- build prompt_masks ----------
@@ -153,16 +200,24 @@ class JointThreshold(DllmAlgorithm):
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
         skip_attn_backend_init = False
+        loop_iterations = 0
+        any_changed_in_last_step = False
 
         max_iterations = self.block_size + self.max_post_edit_steps
         for _ in range(max_iterations):
-            if finished.all():
+            local_active = local_has_mask and not bool(finished.all())
+            if not any_dp_rank_active(local_active):
                 break
             out = model_runner.forward(
                 forward_batch, skip_attn_backend_init, pp_proxy_tensors=None
             )
+            model_forward_count += 1
+            loop_iterations += 1
             skip_attn_backend_init = True
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+
+            if not local_active:
+                continue
 
             if self.vectorized_decoding:
                 changed_any = joint_threshold_update_step_vectorized(
@@ -243,11 +298,30 @@ class JointThreshold(DllmAlgorithm):
                 any_changed_in_last_step = True
 
         # ---------- extra forward ----------
-        if any_changed_in_last_step:
+        extra_forward = any_dp_rank_active(
+            local_has_mask and any_changed_in_last_step
+        )
+        if extra_forward:
             out = model_runner.forward(
                 forward_batch, skip_attn_backend_init, pp_proxy_tensors=None
             )
+            model_forward_count += 1
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+
+        if LOG_FORWARD_ITERS:
+            logger.info(
+                "JointThreshold model forwards: count=%d loop_iterations=%d "
+                "extra_forward=%s batch_size=%d has_mask=%s dp_sync=%s",
+                model_forward_count,
+                loop_iterations,
+                extra_forward,
+                batch_size,
+                local_has_mask,
+                sync_dp_iterations,
+            )
+
+        if not local_has_mask:
+            return logits_output, [], can_run_cuda_graph
 
         next_token_ids = torch.reshape(forward_batch.input_ids, (batch_size, -1))
         next_token_ids_list = [

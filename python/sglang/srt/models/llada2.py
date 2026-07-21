@@ -33,6 +33,7 @@ from sglang.srt.distributed import (
     parallel_state,
     tensor_model_parallel_all_reduce,
 )
+from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
 from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
@@ -290,6 +291,7 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             prefix=add_prefix("experts", prefix),
         )
+        self._shared_expert_tp1 = False
         # shared expert
         if config.num_shared_experts is not None:
             if hasattr(config, "moe_shared_expert_intermediate_size"):
@@ -297,7 +299,10 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
             else:
                 intermediate_size = config.moe_intermediate_size
             intermediate_size *= config.num_shared_experts
-            # disable tp for shared experts when enable deepep moe
+            self._shared_expert_tp1 = (
+                get_moe_a2a_backend().is_deepep()
+                or envs.SGLANG_SHARED_EXPERT_TP1.get()
+            )
             self.shared_experts = LLaDA2MoeMLP(
                 intermediate_size=intermediate_size,
                 config=config,
@@ -305,9 +310,7 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
                 reduce_results=False,
                 prefix=add_prefix("shared_experts", prefix),
                 **(
-                    dict(tp_rank=0, tp_size=1)
-                    if get_moe_a2a_backend().is_deepep()
-                    else {}
+                    dict(tp_rank=0, tp_size=1) if self._shared_expert_tp1 else {}
                 ),
             )
         # dispatcher
@@ -411,7 +414,7 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
             shared_output = self._forward_shared_experts(hidden_states)
             final_hidden_states = self._forward_router_experts(hidden_states)
 
-        if self.num_shared_experts > 0:
+        if self.num_shared_experts > 0 and not self._shared_expert_tp1:
             final_hidden_states = final_hidden_states + shared_output
 
         if self.tp_size > 1 and not should_skip_post_experts_all_reduce(
@@ -419,6 +422,8 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
             use_reduce_scatter=use_reduce_scatter,
         ):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+        if self.num_shared_experts > 0 and self._shared_expert_tp1:
+            final_hidden_states = final_hidden_states + shared_output
         return final_hidden_states.view(num_tokens, hidden_size)
 
     def forward_deepep(
@@ -429,7 +434,7 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
         if is_non_idle_and_non_empty(forward_mode, hidden_states):
             router_logits = self.gate(hidden_states)
             if self.num_shared_experts > 0:
-                shared_output = self.shared_experts(hidden_states)
+                shared_output = self._forward_shared_experts(hidden_states)
 
             topk_output = self.topk(
                 hidden_states,

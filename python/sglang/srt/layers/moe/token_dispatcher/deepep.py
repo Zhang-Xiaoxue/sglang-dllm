@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from sglang.srt.layers.moe.utils import (
     get_deepep_output_dtype,
     is_tbo_enabled,
 )
+from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
     get_bool_env_var,
     is_blackwell,
@@ -58,6 +60,15 @@ try:
     use_deepep = True
 except ImportError:
     use_deepep = False
+
+_supports_deepep_quant_mode = False
+if use_deepep:
+    try:
+        _supports_deepep_quant_mode = (
+            "quant_mode" in inspect.signature(Buffer.low_latency_dispatch).parameters
+        )
+    except (TypeError, ValueError):
+        pass
 
 from enum import Enum, IntEnum, auto
 
@@ -705,6 +716,13 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
 
         buffer = self._get_buffer()
         _deepep_precompile_tp_barrier()
+        quant_mode_opts = {}
+        if (
+            _is_npu
+            and self.deepep_output_dtype == DeepEPOutputDtype.INT8
+            and _supports_deepep_quant_mode
+        ):
+            quant_mode_opts["quant_mode"] = "int8"
         packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
             buffer.low_latency_dispatch(
                 hidden_states,
@@ -720,6 +738,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 ),
                 async_finish=not self.return_recv_hook,
                 return_recv_hook=self.return_recv_hook,
+                **quant_mode_opts,
                 **fp8_deepgemm_scale_opts,
             )
         )
@@ -941,7 +960,15 @@ class DeepEPDispatcher(BaseDispatcher):
                 or forward_batch.forward_mode.is_extend()
             )
             source = "tc_piecewise_forward_batch"
-        resolved_deepep_mode = self.deepep_mode.resolve(is_extend_in_batch)
+        server_args = get_global_server_args()
+        is_dllm = server_args is not None and server_args.dllm_algorithm is not None
+        # Diffusion LLM steps use DLLM_EXTEND for fixed-size token blocks, but
+        # their repeated small-batch workload has decode-like communication.
+        resolved_deepep_mode = (
+            DeepEPMode.LOW_LATENCY
+            if _is_npu and self.deepep_mode.is_auto() and is_dllm
+            else self.deepep_mode.resolve(is_extend_in_batch)
+        )
         if envs.SGLANG_NPU_DEEPEP_DEBUG_GRAPH_LOG.get():
             count = getattr(self, "_debug_mode_log_count", 0)
             if count < 64:

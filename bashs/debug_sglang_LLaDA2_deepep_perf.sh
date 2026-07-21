@@ -13,7 +13,8 @@ Usage:
 Cases:
   none_ep1              No EP baseline: backend=none, TP=4, EP=1
   none_ep4              EP baseline without token A2A: backend=none, TP=4, EP=4
-  deepep_graph          DeepEP with decode/full and prefill/tc_piecewise graphs
+  none_dp_attention     backend=none with attention DP and the same EP layout
+  deepep_graph          DeepEP with the native dLLM decode/full graph
   deepep_eager          DeepEP with decode and prefill graphs disabled
   deepep_low_latency    Same as deepep_graph, but force low_latency mode
   deepep_int8           Same as deepep_graph, but use INT8 dispatch
@@ -39,11 +40,54 @@ Useful overrides:
   SGLANG_DEEPEP_DEBUG_BATCH_SIZE=1
   SGLANG_DEEPEP_DEBUG_MAX_NEW_TOKENS=32
   SGLANG_DEEPEP_DEBUG_MAX_RUNNING_REQUESTS=4
+  SGLANG_DEEPEP_DEBUG_ENABLE_GRAPH=0
+  SGLANG_DEEPEP_DEBUG_RANDOM_SEED=0
   SGLANG_DEEPEP_DEBUG_CASES="none_ep1 none_ep4 deepep_eager deepep_graph"
   SGLANG_DEEPEP_DEBUG_EXPECTED_TEXT=460
   SGLANG_DEEPEP_DEBUG_VERBOSE_GRAPH=1
+  SGLANG_DEEPEP_DEBUG_NPU_READY_TIMEOUT=600
+  SGLANG_DEEPEP_DEBUG_NPU_READY_HBM_PERCENT=10
   SGLANG_DEEPEP_DEBUG_EXTRA_ARGS="--skip-server-warmup"
 EOF
+}
+
+wait_for_visible_npus() {
+  local devices=${ASCEND_RT_VISIBLE_DEVICES:-1,2,3,5}
+  local timeout=${SGLANG_DEEPEP_DEBUG_NPU_READY_TIMEOUT:-600}
+  local max_hbm=${SGLANG_DEEPEP_DEBUG_NPU_READY_HBM_PERCENT:-10}
+  local poll_interval=${SGLANG_DEEPEP_DEBUG_NPU_READY_POLL_INTERVAL:-5}
+  local deadline=$((SECONDS + timeout))
+  local device output hbm aicore all_ready
+
+  if ! command -v npu-smi >/dev/null 2>&1; then
+    echo "WARNING: npu-smi is unavailable; skipping NPU readiness check" >&2
+    return 0
+  fi
+
+  while (( SECONDS < deadline )); do
+    all_ready=1
+    IFS=',' read -r -a ready_devices <<< "${devices}"
+    for device in "${ready_devices[@]}"; do
+      device=${device//[[:space:]]/}
+      [[ -z "${device}" ]] && continue
+      if ! output=$(npu-smi info -t usages -i "${device}" 2>/dev/null); then
+        all_ready=0
+        echo "Waiting for NPU ${device}: npu-smi query failed"
+        continue
+      fi
+      hbm=$(awk -F: '/HBM Usage Rate\(%\)/ {gsub(/[^0-9]/, "", $2); print $2; exit}' <<< "${output}")
+      aicore=$(awk -F: '/Aicore Usage Rate\(%\)/ {gsub(/[^0-9]/, "", $2); print $2; exit}' <<< "${output}")
+      if [[ -z "${hbm}" || -z "${aicore}" || ${hbm} -gt ${max_hbm} || ${aicore} -gt 0 ]]; then
+        all_ready=0
+        echo "Waiting for NPU ${device}: HBM=${hbm:-unknown}% AICore=${aicore:-unknown}%"
+      fi
+    done
+    (( all_ready == 1 )) && return 0
+    sleep "${poll_interval}"
+  done
+
+  echo "Timed out after ${timeout}s waiting for NPUs ${devices} to become idle" >&2
+  return 1
 }
 
 CASE_NAME=${1:-deepep_graph}
@@ -74,16 +118,28 @@ if [[ "${CASE_NAME}" == "matrix" ]]; then
   fi
 
   read -r -a MATRIX_CASES <<< "${SGLANG_DEEPEP_DEBUG_CASES:-none_ep1 none_ep4 deepep_eager deepep_graph deepep_int8}"
+  MATRIX_INTER_CASE_DELAY=${SGLANG_DEEPEP_DEBUG_INTER_CASE_DELAY:-30}
   matrix_status=0
   echo "Run root: ${RUN_ROOT}"
   echo "Cases: ${MATRIX_CASES[*]}"
-  for matrix_case in "${MATRIX_CASES[@]}"; do
+  echo "Inter-case cooldown: ${MATRIX_INTER_CASE_DELAY}s"
+  for matrix_index in "${!MATRIX_CASES[@]}"; do
+    matrix_case=${MATRIX_CASES[${matrix_index}]}
     echo
     echo "===== ${matrix_case} (${MODE}) ====="
+    if ! wait_for_visible_npus; then
+      echo "Case skipped because the requested NPUs are not idle: ${matrix_case}" >&2
+      matrix_status=1
+      continue
+    fi
     if ! SGLANG_DEEPEP_DEBUG_RUN_ROOT="${RUN_ROOT}" \
       bash "${SCRIPT_PATH}" "${matrix_case}" "${MODE}"; then
       echo "Case failed: ${matrix_case}; continuing" >&2
       matrix_status=1
+    fi
+    if (( matrix_index + 1 < ${#MATRIX_CASES[@]} && MATRIX_INTER_CASE_DELAY > 0 )); then
+      echo "Waiting ${MATRIX_INTER_CASE_DELAY}s for NPU contexts to be reclaimed before the next case"
+      sleep "${MATRIX_INTER_CASE_DELAY}"
     fi
   done
   echo
@@ -104,6 +160,7 @@ MOE_A2A_BACKEND=deepep
 DEEPEP_MODE=${SGLANG_DEEPEP_DEBUG_DEEPEP_MODE:-auto}
 DISPATCH_DTYPE=${SGLANG_DEEPEP_DEBUG_DISPATCH_DTYPE:-auto}
 ENABLE_GRAPH=1
+ENABLE_PREFILL_GRAPH=0
 ENABLE_SBO=0
 ENABLE_TBO=0
 ENABLE_DP_ATTENTION=0
@@ -120,6 +177,13 @@ case "${CASE_NAME}" in
     MOE_A2A_BACKEND=none
     EP_SIZE=${TP_SIZE}
     CASE_PURPOSE="EP baseline without token all-to-all"
+    ;;
+  none_dp_attention)
+    MOE_A2A_BACKEND=none
+    EP_SIZE=${TP_SIZE}
+    DP_SIZE=${TP_SIZE}
+    ENABLE_DP_ATTENTION=1
+    CASE_PURPOSE="backend=none with attention DP"
     ;;
   deepep_graph)
     CASE_PURPOSE="DeepEP graph target"
@@ -138,6 +202,7 @@ case "${CASE_NAME}" in
     ;;
   deepep_no_moe_split)
     DISABLE_MOE_SPLIT=1
+    ENABLE_PREFILL_GRAPH=1
     CASE_PURPOSE="Isolate piecewise MoE graph splitting"
     ;;
   deepep_sbo)
@@ -160,18 +225,23 @@ case "${CASE_NAME}" in
     ;;
 esac
 
+ENABLE_GRAPH=${SGLANG_DEEPEP_DEBUG_ENABLE_GRAPH:-${ENABLE_GRAPH}}
+ENABLE_PREFILL_GRAPH=${SGLANG_DEEPEP_DEBUG_ENABLE_PREFILL_GRAPH:-${ENABLE_PREFILL_GRAPH}}
 EP_SIZE=${SGLANG_DEEPEP_DEBUG_EP:-${EP_SIZE}}
 DP_SIZE=${SGLANG_DEEPEP_DEBUG_DP:-${DP_SIZE}}
 MEM_FRACTION_STATIC=${SGLANG_DEEPEP_DEBUG_MEM_FRACTION_STATIC:-0.90}
 MAX_RUNNING_REQUESTS=${SGLANG_DEEPEP_DEBUG_MAX_RUNNING_REQUESTS:-4}
+RANDOM_SEED=${SGLANG_DEEPEP_DEBUG_RANDOM_SEED:-0}
 BATCH_SIZE=${SGLANG_DEEPEP_DEBUG_BATCH_SIZE:-1}
 WARMUP_NEW_TOKENS=${SGLANG_DEEPEP_DEBUG_WARMUP_NEW_TOKENS:-32}
 MAX_NEW_TOKENS=${SGLANG_DEEPEP_DEBUG_MAX_NEW_TOKENS:-32}
 REQUEST_TIMEOUT=${SGLANG_DEEPEP_DEBUG_REQUEST_TIMEOUT:-900}
 SERVER_TIMEOUT=${SGLANG_DEEPEP_DEBUG_SERVER_TIMEOUT:-1800}
+SERVER_SHUTDOWN_TIMEOUT=${SGLANG_DEEPEP_DEBUG_SERVER_SHUTDOWN_TIMEOUT:-60}
 PROFILE_STEPS=${SGLANG_DEEPEP_DEBUG_PROFILE_STEPS:-8}
-PROFILE_TIMEOUT=${SGLANG_DEEPEP_DEBUG_PROFILE_TIMEOUT:-300}
+PROFILE_TIMEOUT=${SGLANG_DEEPEP_DEBUG_PROFILE_TIMEOUT:-900}
 PROFILE_START_DELAY=${SGLANG_DEEPEP_DEBUG_PROFILE_START_DELAY:-5}
+PROFILE_MANUAL_STOP=${SGLANG_DEEPEP_DEBUG_PROFILE_MANUAL_STOP:-0}
 ALGORITHM_CONFIG=${SGLANG_DEEPEP_DEBUG_ALGORITHM_CONFIG:-${REPO_ROOT}/test/registered/dllm/joint_threshold.yaml}
 PROMPT=${SGLANG_DEEPEP_DEBUG_PROMPT:-Question: Eliza earns 10 dollars per hour for 40 hours and 1.2 times that rate for overtime. If she works 45 hours, what are her total earnings? Answer:}
 EXPECTED_TEXT=${SGLANG_DEEPEP_DEBUG_EXPECTED_TEXT:-}
@@ -200,6 +270,9 @@ if (( visible_count < TP_SIZE )); then
   echo "TP_SIZE=${TP_SIZE}, but only ${visible_count} NPU(s) are visible: ${ASCEND_RT_VISIBLE_DEVICES}" >&2
   exit 2
 fi
+if [[ "${MODE}" != "dry-run" ]]; then
+  wait_for_visible_npus
+fi
 
 CASE_DIR=${RUN_ROOT}/${CASE_NAME}
 SERVER_LOG=${CASE_DIR}/server.log
@@ -210,6 +283,7 @@ WARMUP_METRICS=${CASE_DIR}/warmup_metrics.env
 RESPONSE_FILE=${CASE_DIR}/response.json
 METRICS_FILE=${CASE_DIR}/request_metrics.env
 PROFILER_LOG=${CASE_DIR}/profiler_control.log
+PROFILER_STOP_LOG=${CASE_DIR}/profiler_stop.log
 PROFILE_DIR=${CASE_DIR}/profile
 SUMMARY_CSV=${RUN_ROOT}/summary.csv
 mkdir -p "${CASE_DIR}" "${PROFILE_DIR}"
@@ -221,9 +295,8 @@ export SGLANG_PROFILE_WITH_STACK=${SGLANG_DEEPEP_DEBUG_PROFILE_WITH_STACK:-0}
 export SGLANG_PROFILE_RECORD_SHAPES=${SGLANG_DEEPEP_DEBUG_PROFILE_RECORD_SHAPES:-1}
 export SGLANG_LOG_FORWARD_ITERS=${SGLANG_DEEPEP_DEBUG_LOG_FORWARD_ITERS:-1}
 export SGLANG_NPU_PIECEWISE_STATIC_INPUT_COPY=${SGLANG_NPU_PIECEWISE_STATIC_INPUT_COPY:-1}
-export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK:-128}
 
-if (( ENABLE_GRAPH == 1 )); then
+if (( ENABLE_GRAPH == 1 && ENABLE_PREFILL_GRAPH == 1 )); then
   export SGLANG_NPU_DLLM_DEEPEP_PREFILL_GRAPH=1
 else
   export SGLANG_NPU_DLLM_DEEPEP_PREFILL_GRAPH=0
@@ -250,6 +323,25 @@ unset SGLANG_NPU_PIECEWISE_SYNC_REPLAY || true
 read -r -a CUDA_GRAPH_BS_DECODE <<< "${SGLANG_DEEPEP_DEBUG_CUDA_GRAPH_BS_DECODE:-1 2 4}"
 read -r -a CUDA_GRAPH_BS_PREFILL <<< "${SGLANG_DEEPEP_DEBUG_CUDA_GRAPH_BS_PREFILL:-32}"
 
+max_configured_bs=${MAX_RUNNING_REQUESTS}
+if (( ENABLE_GRAPH == 1 )); then
+  for graph_bs in "${CUDA_GRAPH_BS_DECODE[@]}"; do
+    (( graph_bs > max_configured_bs )) && max_configured_bs=${graph_bs}
+  done
+fi
+max_local_bs=${max_configured_bs}
+if (( ENABLE_DP_ATTENTION == 1 )); then
+  max_local_bs=$(((max_configured_bs + DP_SIZE - 1) / DP_SIZE))
+fi
+min_dispatch_tokens=$((max_local_bs * 32))
+export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK:-${min_dispatch_tokens}}
+if [[ "${MOE_A2A_BACKEND}" == "deepep" ]]; then
+  if (( SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK < min_dispatch_tokens )); then
+    echo "DeepEP dispatch capacity ${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK} is below the configured minimum ${min_dispatch_tokens}" >&2
+    exit 2
+  fi
+fi
+
 CMD=(
   python3 -m sglang.launch_server
   --model-path "${MODEL_PATH}"
@@ -263,7 +355,7 @@ CMD=(
   --trust-remote-code
   --mem-fraction-static "${MEM_FRACTION_STATIC}"
   --max-running-requests "${MAX_RUNNING_REQUESTS}"
-  --enable-tokenizer-batch-encode
+  --random-seed "${RANDOM_SEED}"
   --tp "${TP_SIZE}"
   --ep "${EP_SIZE}"
   --dp-size "${DP_SIZE}"
@@ -273,6 +365,10 @@ CMD=(
   --dllm-algorithm JointThreshold
   --dllm-algorithm-config "${ALGORITHM_CONFIG}"
 )
+
+if (( ENABLE_DP_ATTENTION == 0 )); then
+  CMD+=(--enable-tokenizer-batch-encode)
+fi
 
 if [[ "${MOE_A2A_BACKEND}" == "deepep" ]]; then
   CMD+=(
@@ -285,10 +381,16 @@ if (( ENABLE_GRAPH == 1 )); then
   CMD+=(
     --cuda-graph-backend-decode full
     --cuda-graph-bs-decode "${CUDA_GRAPH_BS_DECODE[@]}"
-    --cuda-graph-backend-prefill tc_piecewise
-    --cuda-graph-bs-prefill "${CUDA_GRAPH_BS_PREFILL[@]}"
-    --cuda-graph-tc-compiler eager
   )
+  if (( ENABLE_PREFILL_GRAPH == 1 )); then
+    CMD+=(
+      --cuda-graph-backend-prefill tc_piecewise
+      --cuda-graph-bs-prefill "${CUDA_GRAPH_BS_PREFILL[@]}"
+      --cuda-graph-tc-compiler eager
+    )
+  else
+    CMD+=(--cuda-graph-backend-prefill disabled)
+  fi
 else
   CMD+=(
     --cuda-graph-backend-decode disabled
@@ -298,7 +400,7 @@ fi
 
 (( ENABLE_SBO == 1 )) && CMD+=(--enable-single-batch-overlap)
 (( ENABLE_TBO == 1 )) && CMD+=(--enable-two-batch-overlap)
-(( ENABLE_DP_ATTENTION == 1 )) && CMD+=(--enable-dp-attention)
+(( ENABLE_DP_ATTENTION == 1 )) && CMD+=(--enable-dp-attention --enable-dp-lm-head)
 [[ "${SGLANG_DEEPEP_DEBUG_SKIP_SERVER_WARMUP:-1}" == "1" ]] && CMD+=(--skip-server-warmup)
 [[ "${SGLANG_DEEPEP_DEBUG_ENABLE_CACHE_REPORT:-0}" == "1" ]] && CMD+=(--enable-cache-report)
 
@@ -326,17 +428,36 @@ print_command() {
   echo "deepep_mode=${DEEPEP_MODE}"
   echo "dispatch_dtype=${DISPATCH_DTYPE}"
   echo "decode_graph=$([[ ${ENABLE_GRAPH} == 1 ]] && echo full || echo disabled)"
-  echo "prefill_graph=$([[ ${ENABLE_GRAPH} == 1 ]] && echo tc_piecewise || echo disabled)"
+  echo "prefill_graph=$([[ ${ENABLE_GRAPH} == 1 && ${ENABLE_PREFILL_GRAPH} == 1 ]] && echo tc_piecewise || echo disabled)"
   echo "sbo=${ENABLE_SBO}"
   echo "tbo=${ENABLE_TBO}"
   echo "dp_attention=${ENABLE_DP_ATTENTION}"
   echo "disable_moe_split=${DISABLE_MOE_SPLIT}"
   echo "batch_size=${BATCH_SIZE}"
   echo "max_new_tokens=${MAX_NEW_TOKENS}"
+  echo "algorithm_config=${ALGORITHM_CONFIG}"
+  echo "max_dispatch_tokens_per_rank=${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK}"
+  echo "random_seed=${RANDOM_SEED}"
   echo "profile_dir=${PROFILE_DIR}"
   printf 'command='
   print_command
 } > "${MANIFEST_FILE}"
+
+python3 - <<'PY' >> "${MANIFEST_FILE}"
+import importlib.metadata
+import importlib.util
+
+for distribution in ("deep_ep", "sgl_kernel_npu"):
+    try:
+        version = importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        version = "not-installed"
+    print(f"{distribution}_version={version}")
+
+for module in ("deep_ep", "deep_ep_cpp", "sgl_kernel_npu"):
+    spec = importlib.util.find_spec(module)
+    print(f"{module}_origin={spec.origin if spec is not None else 'not-found'}")
+PY
 
 print_case_info() {
   echo "Case: ${CASE_NAME}"
@@ -346,8 +467,10 @@ print_case_info() {
   echo "NPU devices: ${ASCEND_RT_VISIBLE_DEVICES}"
   echo "Parallelism: TP=${TP_SIZE} EP=${EP_SIZE} DP=${DP_SIZE} MOE_DP=${MOE_DP_SIZE}"
   echo "MoE: backend=${MOE_A2A_BACKEND} mode=${DEEPEP_MODE} dispatch_dtype=${DISPATCH_DTYPE}"
-  echo "Graph: enabled=${ENABLE_GRAPH} decode_bs=${CUDA_GRAPH_BS_DECODE[*]} prefill_bs=${CUDA_GRAPH_BS_PREFILL[*]}"
+  echo "DeepEP capacity: max_dispatch_tokens_per_rank=${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK}"
+  echo "Graph: enabled=${ENABLE_GRAPH} decode_bs=${CUDA_GRAPH_BS_DECODE[*]} prefill_enabled=${ENABLE_PREFILL_GRAPH} prefill_bs=${CUDA_GRAPH_BS_PREFILL[*]}"
   echo "Overlap: SBO=${ENABLE_SBO} TBO=${ENABLE_TBO} DP_attention=${ENABLE_DP_ATTENTION}"
+  echo "Reproducibility: server_random_seed=${RANDOM_SEED} request_sampling_seed=0"
   if (( ENABLE_DP_ATTENTION == 1 )); then
     echo "WARNING: DP attention is an isolation experiment; server_args does not list LLaDA2 as supported."
   fi
@@ -380,9 +503,17 @@ cleanup_server() {
     return
   fi
   if kill -0 "${SERVER_PID}" 2>/dev/null; then
+    kill -TERM "${SERVER_PID}" 2>/dev/null || true
+    local shutdown_deadline=$((SECONDS + SERVER_SHUTDOWN_TIMEOUT))
+    while kill -0 "${SERVER_PID}" 2>/dev/null && (( SECONDS < shutdown_deadline )); do
+      sleep 1
+    done
+  fi
+  if kill -0 "${SERVER_PID}" 2>/dev/null; then
+    echo "Server did not exit after ${SERVER_SHUTDOWN_TIMEOUT}s; forcing cleanup" >&2
     python3 -c \
-      'import sys; from sglang.srt.utils import kill_process_tree; kill_process_tree(int(sys.argv[1]))' \
-      "${SERVER_PID}" >/dev/null 2>&1 || kill "${SERVER_PID}" 2>/dev/null || true
+      'import sys; from sglang.srt.utils import kill_process_tree; kill_process_tree(int(sys.argv[1]), wait_timeout=15)' \
+      "${SERVER_PID}" >/dev/null 2>&1 || kill -KILL "${SERVER_PID}" 2>/dev/null || true
   fi
   wait "${SERVER_PID}" 2>/dev/null || true
   SERVER_PID=""
@@ -521,20 +652,41 @@ run_fixed_request "${WARMUP_NEW_TOKENS}" "${WARMUP_RESPONSE}" "${WARMUP_METRICS}
 
 if [[ "${MODE}" == "profile" ]]; then
   echo
-  echo "Starting profiler: steps=${PROFILE_STEPS}, output=${PROFILE_DIR}"
+  profiler_steps=${PROFILE_STEPS}
+  if (( PROFILE_MANUAL_STOP == 1 )); then
+    # dLLM may issue idle forwards before the measured request starts.
+    profiler_steps=1000000
+  fi
+  echo "Starting profiler: steps=${profiler_steps}, manual_stop=${PROFILE_MANUAL_STOP}, output=${PROFILE_DIR}"
   PYTHONUNBUFFERED=1 timeout "${PROFILE_TIMEOUT}" \
     python3 -m sglang.profiler \
       --url "http://${CLIENT_HOST}:${PORT}" \
       --output-dir "${PROFILE_DIR}" \
-      --num-steps "${PROFILE_STEPS}" \
+      --num-steps "${profiler_steps}" \
       --profile-prefix "${CASE_NAME}" \
       > "${PROFILER_LOG}" 2>&1 &
   PROFILER_PID=$!
+
+  profile_start_deadline=$((SECONDS + 60))
+  while (( SECONDS < profile_start_deadline )); do
+    if grep -q "Profiling starts" "${SERVER_LOG}"; then
+      break
+    fi
+    if ! kill -0 "${PROFILER_PID}" 2>/dev/null; then
+      echo "Profiler controller exited before profiling started" >&2
+      break
+    fi
+    sleep 1
+  done
+  if ! grep -q "Profiling starts" "${SERVER_LOG}"; then
+    echo "Profiler did not start within 60 seconds" >&2
+  fi
   sleep "${PROFILE_START_DELAY}"
 fi
 
 echo
 echo "Measured request: batch=${BATCH_SIZE}, max_new_tokens=${MAX_NEW_TOKENS}"
+measurement_log_start=$(wc -l < "${SERVER_LOG}")
 request_status=0
 if run_fixed_request "${MAX_NEW_TOKENS}" "${RESPONSE_FILE}" "${METRICS_FILE}"; then
   request_status=0
@@ -544,6 +696,18 @@ else
 fi
 
 if [[ "${MODE}" == "profile" ]]; then
+  if (( PROFILE_MANUAL_STOP == 1 )); then
+    echo "Stopping profiler after the measured request"
+    if timeout "${PROFILE_TIMEOUT}" \
+      curl -fsS -X POST "http://${CLIENT_HOST}:${PORT}/stop_profile" \
+        > "${PROFILER_STOP_LOG}" 2>&1; then
+      :
+    else
+      profiler_stop_status=$?
+      echo "Profiler stop/export returned exit=${profiler_stop_status}; see ${PROFILER_STOP_LOG}" >&2
+    fi
+  fi
+
   profiler_status=0
   if wait "${PROFILER_PID}"; then
     profiler_status=0
@@ -554,6 +718,20 @@ if [[ "${MODE}" == "profile" ]]; then
   fi
   PROFILER_PID=""
   echo "Profiler controller log: ${PROFILER_LOG}"
+
+  if (( PROFILE_MANUAL_STOP == 0 )); then
+    echo "Stopping profiler and waiting for trace export"
+    if timeout "${PROFILE_TIMEOUT}" \
+      curl -fsS -X POST "http://${CLIENT_HOST}:${PORT}/stop_profile" \
+        > "${PROFILER_STOP_LOG}" 2>&1; then
+      echo "Profiler trace export completed"
+    else
+      profiler_stop_status=$?
+      echo "Profiler stop/export returned exit=${profiler_stop_status}; see ${PROFILER_STOP_LOG}" >&2
+    fi
+  else
+    echo "Profiler trace export completed"
+  fi
 fi
 
 cleanup_server
@@ -563,6 +741,29 @@ graph_true=$(awk '/npu graph: True/{count += 1} END{print count + 0}' "${SERVER_
 graph_false=$(awk '/npu graph: False/{count += 1} END{print count + 0}' "${SERVER_LOG}")
 resolved_low_latency=$(awk '/resolved_mode=DeepEPMode.LOW_LATENCY/{count += 1} END{print count + 0}' "${SERVER_LOG}")
 resolved_normal=$(awk '/resolved_mode=DeepEPMode.NORMAL/{count += 1} END{print count + 0}' "${SERVER_LOG}")
+model_forwards=$(awk -v start="$((measurement_log_start + 1))" '
+  NR >= start && /JointThreshold model forwards:/ {
+    rank = "0"
+    for (i = 1; i <= NF; i++) {
+      if ($i ~ /DP[0-9]+/) {
+        rank = $i
+        sub(/^.*DP/, "", rank)
+        sub(/[^0-9].*$/, "", rank)
+      }
+      if ($i ~ /^count=/) {
+        split($i, value, "=")
+        totals[rank] += value[2]
+      }
+    }
+  }
+  END {
+    maximum = 0
+    for (rank in totals) {
+      if (totals[rank] > maximum) maximum = totals[rank]
+    }
+    print maximum + 0
+  }
+' "${SERVER_LOG}")
 
 wall_time=""
 server_latency=""
@@ -571,20 +772,26 @@ throughput=""
 expected_match=""
 max_char_ratio=""
 degenerate_output=""
+ms_per_model_forward=""
 if [[ -f "${METRICS_FILE}" ]]; then
   # The generated file contains numeric assignments only.
   source "${METRICS_FILE}"
 fi
+if [[ -n "${server_latency}" ]] && (( model_forwards > 0 )); then
+  ms_per_model_forward=$(awk -v latency="${server_latency}" -v count="${model_forwards}" \
+    'BEGIN { printf "%.6f", latency * 1000 / count }')
+fi
 
 if [[ ! -s "${SUMMARY_CSV}" ]]; then
-  echo "case,backend,tp,ep,dp,graph,dispatch_dtype,sbo,tbo,batch,max_new_tokens,request_exit,wall_seconds,server_latency,total_tokens,tokens_per_second,expected_match,max_char_ratio,degenerate_output,graph_true,graph_false,resolved_low_latency,resolved_normal,case_dir" > "${SUMMARY_CSV}"
+  echo "case,backend,tp,ep,dp,graph,dispatch_dtype,sbo,tbo,batch,max_new_tokens,request_exit,wall_seconds,server_latency,total_tokens,tokens_per_second,model_forwards,ms_per_model_forward,expected_match,max_char_ratio,degenerate_output,graph_true,graph_false,resolved_low_latency,resolved_normal,case_dir" > "${SUMMARY_CSV}"
 fi
-printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
   "${CASE_NAME}" "${MOE_A2A_BACKEND}" "${TP_SIZE}" "${EP_SIZE}" "${DP_SIZE}" \
   "${ENABLE_GRAPH}" "${DISPATCH_DTYPE}" "${ENABLE_SBO}" "${ENABLE_TBO}" \
   "${BATCH_SIZE}" "${MAX_NEW_TOKENS}" "${request_status}" "${wall_time}" \
-  "${server_latency}" "${total_tokens}" "${throughput}" "${expected_match}" \
-  "${max_char_ratio}" "${degenerate_output}" "${graph_true}" "${graph_false}" \
+  "${server_latency}" "${total_tokens}" "${throughput}" "${model_forwards}" \
+  "${ms_per_model_forward}" "${expected_match}" "${max_char_ratio}" \
+  "${degenerate_output}" "${graph_true}" "${graph_false}" \
   "${resolved_low_latency}" "${resolved_normal}" \
   "${CASE_DIR}" >> "${SUMMARY_CSV}"
 
@@ -593,6 +800,7 @@ echo "Diagnostic summary"
 echo "  graph_true=${graph_true} graph_false=${graph_false}"
 echo "  resolved_low_latency=${resolved_low_latency} resolved_normal=${resolved_normal}"
 echo "  request_exit=${request_status} tokens=${total_tokens} throughput=${throughput}"
+echo "  model_forwards=${model_forwards} ms_per_model_forward=${ms_per_model_forward}"
 echo "  expected_match=${expected_match} max_char_ratio=${max_char_ratio} degenerate_output=${degenerate_output}"
 echo "  server_log=${SERVER_LOG}"
 echo "  response=${RESPONSE_FILE}"

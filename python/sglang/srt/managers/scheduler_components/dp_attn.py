@@ -183,6 +183,7 @@ def prepare_mlp_sync_batch_raw(
         local_batch is None
         or local_batch.forward_mode.is_decode_or_idle()
         or local_batch.forward_mode.is_prebuilt()
+        or local_batch.forward_mode.is_dllm_extend()
     ) and not disable_cuda_graph
     can_run_breakable_cuda_graph = (
         local_batch is not None

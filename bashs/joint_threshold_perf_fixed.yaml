@@ -1,0 +1,7 @@
+# Performance-only configuration. It makes each 32-token block execute two
+# model forwards so backend timing is not skewed by adaptive convergence.
+block_size: 32
+vectorized_decoding: true
+threshold: 0.0
+edit_threshold: 0.0
+max_post_edit_steps: 0

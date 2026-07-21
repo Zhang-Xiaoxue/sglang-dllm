@@ -788,7 +788,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
         group_list_type = 1
 
         if DispatchOutputChecker.format_is_deepep_normal(dispatch_output):
-            hidden_states, _, _, _, num_recv_tokens_per_expert = dispatch_output
+            (
+                hidden_states,
+                hidden_states_scale,
+                _,
+                _,
+                num_recv_tokens_per_expert,
+            ) = dispatch_output
             group_list = torch.tensor(
                 num_recv_tokens_per_expert,
                 dtype=torch.int64,
@@ -796,12 +802,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
             )
             combine_cls = DeepEPNormalCombineInput
         else:
-            hidden_states, _, _, _, group_list, _ = dispatch_output
+            hidden_states, hidden_states_scale, _, _, group_list, _ = dispatch_output
             group_list = group_list.to(torch.int64)
             combine_cls = DeepEPLLCombineInput
 
         hidden_states = npu_fused_moe_without_routing_weights_bf16(
-            layer, hidden_states, group_list_type, group_list, output_dtype
+            layer,
+            hidden_states,
+            group_list_type,
+            group_list,
+            output_dtype,
+            hidden_states_scale,
         )
         return combine_cls(
             hidden_states=hidden_states,

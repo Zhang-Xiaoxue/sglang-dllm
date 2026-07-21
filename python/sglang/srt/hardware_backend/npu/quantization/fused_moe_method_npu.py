@@ -2,7 +2,10 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import torch
+import triton
+import triton.language as tl
 
+from sgl_kernel_npu.utils.triton_utils import get_device_properties
 from sglang.srt.hardware_backend.npu.utils import npu_format_cast
 from sglang.srt.layers.quantization.base_config import FusedMoEMethodBase
 
@@ -14,6 +17,48 @@ if TYPE_CHECKING:
         DispatchOutput,
     )
     from sglang.srt.layers.quantization.base_config import QuantizationConfig
+
+
+@triton.jit
+def _deepep_int8_dequant_kernel(
+    input_ptr,
+    scale_ptr,
+    output_ptr,
+    NUM_ROWS: tl.constexpr,
+    NUM_COLS: tl.constexpr,
+    BLOCK_COLS: tl.constexpr,
+    NUM_CORES: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    cols = tl.arange(0, BLOCK_COLS)
+    col_mask = cols < NUM_COLS
+
+    for row in range(pid, NUM_ROWS, NUM_CORES):
+        offsets = row * NUM_COLS + cols
+        values = tl.load(input_ptr + offsets, mask=col_mask, other=0.0)
+        scale = tl.load(scale_ptr + row)
+        tl.store(output_ptr + offsets, values.to(tl.float32) * scale, mask=col_mask)
+
+
+def _deepep_int8_dequant(
+    hidden_states: torch.Tensor,
+    hidden_states_scale: torch.Tensor,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    num_rows, num_cols = hidden_states.shape
+    output = torch.empty_like(hidden_states, dtype=output_dtype)
+    _, num_vector_cores = get_device_properties()
+    _deepep_int8_dequant_kernel[(num_vector_cores,)](
+        hidden_states,
+        hidden_states_scale,
+        output,
+        NUM_ROWS=num_rows,
+        NUM_COLS=num_cols,
+        BLOCK_COLS=triton.next_power_of_2(num_cols),
+        NUM_CORES=num_vector_cores,
+        multibuffer=True,
+    )
+    return output
 
 
 def npu_fused_experts_w4a4(
@@ -277,9 +322,19 @@ def npu_fused_experts_w8a8_decode(
 
 
 def npu_fused_moe_without_routing_weights_bf16(
-    layer, hidden_states, group_list_type, group_list, output_dtype
+    layer,
+    hidden_states,
+    group_list_type,
+    group_list,
+    output_dtype,
+    hidden_states_scale=None,
 ):
     from sgl_kernel_npu.activation.swiglu_quant import swiglu_quant
+
+    if hidden_states_scale is not None:
+        hidden_states = _deepep_int8_dequant(
+            hidden_states, hidden_states_scale, output_dtype
+        )
 
     # gmm1: gate_up_proj
     hidden_states = torch.ops.npu.npu_grouped_matmul(
