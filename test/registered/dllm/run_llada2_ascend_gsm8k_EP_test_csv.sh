@@ -1,176 +1,173 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
-MODEL_SIZE=${SGLANG_DLLM_MODEL_SIZE:-${2:-mini}}
-CSV=${1:-"$SCRIPT_DIR/llada2_${MODEL_SIZE}_gsm8k_EP_test.csv"}
+REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
 
-count_visible_devices() {
-  local devices=${ASCEND_RT_VISIBLE_DEVICES:-}
-  local count=0
-  local device
+MODEL_SIZE=${2:-${SGLANG_DLLM_MODEL_SIZE:-mini}}
+CSV=${1:-"${SCRIPT_DIR}/llada2_${MODEL_SIZE}_ep_backend.csv"}
+BS_LIST=${SGLANG_DLLM_EP_BS_LIST:-"1 4 8 16 32"}
+TP_LIST=${SGLANG_DLLM_EP_TP_LIST:-2}
+EP_LIST=${SGLANG_DLLM_EP_SIZE_LIST:-2}
+BACKEND_LIST=${SGLANG_DLLM_EP_BACKEND_LIST:-"none deepep"}
+DP_SIZE=${SGLANG_DLLM_EP_DP_SIZE:-1}
+GSM8K_NUM_QUESTIONS=${SGLANG_DLLM_GSM8K_NUM_QUESTIONS:-512}
+TEST_SELECTOR=${SGLANG_DLLM_TESTS:-}
+TEST_MODE=original
+[[ -n "${TEST_SELECTOR}" ]] && TEST_MODE="selector:${TEST_SELECTOR}"
 
-  IFS=',' read -r -a visible_devices <<< "$devices"
-  for device in "${visible_devices[@]}"; do
-    device=${device//[[:space:]]/}
-    if [[ -n "$device" ]]; then
-      ((count += 1))
-    fi
-  done
-  echo "$count"
-}
-
-if [[ "$MODEL_SIZE" != "mini" && "$MODEL_SIZE" != "flash" ]]; then
-  echo "MODEL_SIZE must be mini or flash, got: $MODEL_SIZE" >&2
-  exit 1
+if [[ "${MODEL_SIZE}" != "mini" && "${MODEL_SIZE}" != "flash" ]]; then
+  echo "MODEL_SIZE must be mini or flash, got: ${MODEL_SIZE}" >&2
+  exit 2
 fi
 
-case "$CSV" in
-  /*) ;;
-  *) CSV="$SCRIPT_DIR/$CSV" ;;
-esac
-
-mkdir -p "$(dirname "$CSV")"
-cd "$SCRIPT_DIR"
-: > "$CSV"
-export PYTHONPATH="$REPO_ROOT/python:${PYTHONPATH:-}"
-
-if [[ "$MODEL_SIZE" == "flash" ]]; then
-  FLASH_MIN_VISIBLE_DEVICES=${SGLANG_DLLM_FLASH_MIN_VISIBLE_DEVICES:-4}
-  VISIBLE_DEVICE_COUNT=$(count_visible_devices)
-  if (( VISIBLE_DEVICE_COUNT < FLASH_MIN_VISIBLE_DEVICES )); then
-    echo "Skip flash matrix: ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>} exposes ${VISIBLE_DEVICE_COUNT} device(s), but flash requires >=${FLASH_MIN_VISIBLE_DEVICES}."
-    echo "CSV result: $CSV"
-    exit 0
-  fi
+if [[ "${CSV}" != /* ]]; then
+  CSV="${SCRIPT_DIR}/${CSV}"
 fi
+mkdir -p "$(dirname "${CSV}")"
+: > "${CSV}"
 
+export PYTHONPATH="${REPO_ROOT}/python:${PYTHONPATH:-}"
 if [[ -z "${SGLANG_DLLM_GSM8K_DATA_PATH:-}" && -f /tmp/test.jsonl ]]; then
   export SGLANG_DLLM_GSM8K_DATA_PATH=/tmp/test.jsonl
 fi
 
-# Optional unittest selector, for example:
-#   SGLANG_DLLM_TESTS="TestLLaDA2.test_bs_speed" bash run_llada2_ascend_gsm8k_EP_test_csv.sh
-TESTS=${SGLANG_DLLM_TESTS:-}
-TEST_ARGS=()
-if [[ -n "$TESTS" ]]; then
-  read -r -a TEST_ARGS <<< "$TESTS"
-fi
+count_visible_devices() {
+  local count=0
+  local device
+  IFS=',' read -r -a devices <<< "${ASCEND_RT_VISIBLE_DEVICES:-}"
+  for device in "${devices[@]}"; do
+    [[ -n "${device//[[:space:]]/}" ]] && ((count += 1))
+  done
+  echo "${count}"
+}
 
-# Defaults keep the matrix useful but not enormous. Override with env lists as needed.
-read -r -a BS_LIST <<< "${SGLANG_DLLM_EP_BS_LIST:-1 16}"
-read -r -a TP_LIST <<< "${SGLANG_DLLM_EP_TP_LIST:-1 4}"
-read -r -a EP_LIST <<< "${SGLANG_DLLM_EP_SIZE_LIST:-1 2 4}"
-read -r -a BACKEND_LIST <<< "${SGLANG_DLLM_EP_BACKEND_LIST:-none deepep}"
+resolve_mem_fraction_static() {
+  local bs=$1
 
-DP_SIZE=${SGLANG_DLLM_EP_DP_SIZE:-1}
-FAIL_FAST=${SGLANG_DLLM_EP_FAIL_FAST:-0}
+  if [[ -n "${SGLANG_DLLM_MEM_FRACTION_STATIC:-}" ]]; then
+    echo "${SGLANG_DLLM_MEM_FRACTION_STATIC}"
+  elif (( bs <= 8 )); then
+    echo "0.80"
+  elif (( bs <= 16 )); then
+    echo "0.70"
+  elif (( bs <= 32 )); then
+    echo "0.60"
+  elif (( bs <= 64 )); then
+    echo "0.50"
+  else
+    echo "0.40"
+  fi
+}
 
-TOTAL_CASES=0
-PASSED_CASES=0
-FAILED_CASE_COUNT=0
-SKIPPED_CASES=0
+VISIBLE_DEVICE_COUNT=$(count_visible_devices)
+TOTAL=0
+PASSED=0
+FAILED=0
+SKIPPED=0
 FAILED_CASES=()
 
-# Keep deepep graph capture startup bounded by default. Override when testing larger prefill buckets.
-export SGLANG_DLLM_CUDA_GRAPH_BS_PREFILL=${SGLANG_DLLM_CUDA_GRAPH_BS_PREFILL:-32,64,128,256,512}
-
-echo "Run dir: $SCRIPT_DIR"
-echo "Model size: $MODEL_SIZE"
-echo "CSV result: $CSV"
-echo "GSM8K data: ${SGLANG_DLLM_GSM8K_DATA_PATH:-<download>}"
-echo "BS list: ${BS_LIST[*]}"
-echo "TP list: ${TP_LIST[*]}"
-echo "EP list: ${EP_LIST[*]}"
-echo "Backends: ${BACKEND_LIST[*]}"
-echo "Note: deepep cases with ep != tp are skipped because server_args forces ep_size=tp_size."
-if [[ -n "$TESTS" ]]; then
-  echo "Test selector: $TESTS"
-fi
+echo "===== EP backend matrix ====="
+echo "model=${MODEL_SIZE} devices=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
+echo "bs=[${BS_LIST}] tp=[${TP_LIST}] ep=[${EP_LIST}] backend=[${BACKEND_LIST}]"
+echo "rules: none=(ep<=tp and tp%ep==0), deepep=(ep==tp or ep==1)"
+echo "mode=${TEST_MODE}"
+echo "decode_graph_bs=${SGLANG_DLLM_CUDA_GRAPH_BS_DECODE:-<case-bs>}"
+echo "gsm8k_parallel=${SGLANG_DLLM_GSM8K_PARALLEL:-<case-bs>} questions=${GSM8K_NUM_QUESTIONS}"
+echo "mem_fraction_static=${SGLANG_DLLM_MEM_FRACTION_STATIC:-<auto-by-bs>}"
+echo "csv=${CSV}"
 
 run_case() {
   local bs=$1
   local tp=$2
   local ep=$3
-  local dp=$4
-  local moe_a2a_backend=$5
-  local max_running_requests=${SGLANG_DLLM_MAX_RUNNING_REQUESTS:-${SGLANG_DLLM_EP_MAX_RUNNING_REQUESTS:-$bs}}
-  local run_name="llada2_${MODEL_SIZE}_bf16_ep_bs${bs}_tp${tp}_ep${ep}_dp${dp}_${moe_a2a_backend}"
+  local backend=$4
+  local decode_graph_bs=${SGLANG_DLLM_CUDA_GRAPH_BS_DECODE:-${bs}}
+  local gsm8k_parallel=${SGLANG_DLLM_GSM8K_PARALLEL:-${bs}}
+  local mem_fraction_static
+  mem_fraction_static=$(resolve_mem_fraction_static "${bs}")
+  local name="llada2_${MODEL_SIZE}_bf16_ep_bs${bs}_tp${tp}_ep${ep}_dp${DP_SIZE}_${backend}"
 
-  if [[ "$MODEL_SIZE" == "flash" && "$tp" -lt 4 ]]; then
-    echo "Skip invalid flash case: tp must be >= 4, got tp=$tp for ${run_name}" >&2
-    ((SKIPPED_CASES += 1))
-    return 0
+  if (( tp > VISIBLE_DEVICE_COUNT )); then
+    echo "SKIP ${name}: tp=${tp}, visible devices=${VISIBLE_DEVICE_COUNT}" >&2
+    ((SKIPPED += 1))
+    return
+  fi
+  if [[ "${backend}" != "none" && "${backend}" != "deepep" ]]; then
+    echo "SKIP ${name}: unsupported backend=${backend}" >&2
+    ((SKIPPED += 1))
+    return
+  fi
+  if [[ "${backend}" == "none" ]] && (( ep <= 0 || ep > tp || tp % ep != 0 )); then
+    echo "SKIP ${name}: backend=none requires ep<=tp and tp%ep==0" >&2
+    ((SKIPPED += 1))
+    return
+  fi
+  if [[ "${backend}" == "deepep" ]] && (( ep != tp && ep != 1 )); then
+    echo "SKIP ${name}: backend=deepep requires ep==tp or ep==1" >&2
+    ((SKIPPED += 1))
+    return
+  fi
+  if [[ "${MODEL_SIZE}" == "flash" && ${tp} -lt 4 ]]; then
+    echo "SKIP ${name}: flash requires tp>=4" >&2
+    ((SKIPPED += 1))
+    return
+  fi
+  if [[ "${backend}" == "deepep" ]] && (( ep == 1 && tp > 1 )); then
+    echo "NOTE ${name}: current server_args adjusts DeepEP effective ep from 1 to tp=${tp}" >&2
+  fi
+  if [[ "${backend}" == "deepep" ]] && (( bs * 32 > 1024 )); then
+    echo "SKIP ${name}: DeepEP dispatch capacity bs*block_size=$((bs * 32)) exceeds 1024" >&2
+    ((SKIPPED += 1))
+    return
   fi
 
-  if (( ep > tp )); then
-    echo "Skip invalid EP case: ep=$ep > tp=$tp for ${run_name}" >&2
-    ((SKIPPED_CASES += 1))
-    return 0
-  fi
-
-  if [[ "$moe_a2a_backend" == "deepep" ]] && (( ep != tp )); then
-    echo "Skip non-equivalent DeepEP case: requested ep=$ep, tp=$tp for ${run_name}; DeepEP forces ep_size=tp_size" >&2
-    ((SKIPPED_CASES += 1))
-    return 0
-  fi
+  local test_args=()
+  [[ -n "${TEST_SELECTOR}" ]] && test_args+=("${TEST_SELECTOR}")
 
   echo
-  echo "===== ${run_name} -> test_llada2_ascend_gsm8k_ep_bf16.py ====="
-  ((TOTAL_CASES += 1))
+  echo "===== RUN ${name} graph_bs=${decode_graph_bs} gsm8k_parallel=${gsm8k_parallel} questions=${GSM8K_NUM_QUESTIONS} mem_fraction_static=${mem_fraction_static} ====="
+  ((TOTAL += 1))
   if env \
-      SGLANG_DLLM_CSV="$CSV" \
-      SGLANG_DLLM_RUN_NAME="$run_name" \
-      SGLANG_DLLM_MODEL_SIZE="$MODEL_SIZE" \
-      SGLANG_DLLM_ALGORITHM_CONFIG="$SCRIPT_DIR/joint_threshold.yaml" \
-      SGLANG_DLLM_BS="$bs" \
-      SGLANG_DLLM_TP="$tp" \
-      SGLANG_DLLM_EP="$ep" \
-      SGLANG_DLLM_DP="$dp" \
-      SGLANG_DLLM_MAX_RUNNING_REQUESTS="$max_running_requests" \
-      SGLANG_DLLM_MOE_A2A_BACKEND="$moe_a2a_backend" \
-      python3 test_llada2_ascend_gsm8k_ep_bf16.py "${TEST_ARGS[@]}"; then
-    ((PASSED_CASES += 1))
-    echo "===== PASS: ${run_name} ====="
+      SGLANG_DLLM_CSV="${CSV}" \
+      SGLANG_DLLM_RUN_NAME="${name}" \
+      SGLANG_DLLM_MODEL_SIZE="${MODEL_SIZE}" \
+      SGLANG_DLLM_ALGORITHM_CONFIG="${SCRIPT_DIR}/joint_threshold.yaml" \
+      SGLANG_DLLM_BS="${bs}" \
+      SGLANG_DLLM_TP="${tp}" \
+      SGLANG_DLLM_EP="${ep}" \
+      SGLANG_DLLM_DP="${DP_SIZE}" \
+      SGLANG_DLLM_MOE_A2A_BACKEND="${backend}" \
+      SGLANG_DLLM_CUDA_GRAPH_BS_DECODE="${decode_graph_bs}" \
+      SGLANG_DLLM_GSM8K_PARALLEL="${gsm8k_parallel}" \
+      SGLANG_DLLM_GSM8K_NUM_QUESTIONS="${GSM8K_NUM_QUESTIONS}" \
+      SGLANG_DLLM_MEM_FRACTION_STATIC="${mem_fraction_static}" \
+      python3 "${SCRIPT_DIR}/test_llada2_ascend_gsm8k_ep_bf16.py" "${test_args[@]}"; then
+    echo "===== PASS ${name} ====="
+    ((PASSED += 1))
   else
-    local status=$?
-    ((FAILED_CASE_COUNT += 1))
-    FAILED_CASES+=("${run_name} (exit=${status})")
-    echo "===== FAIL: ${run_name} (exit=${status}); continuing =====" >&2
-    if [[ "$FAIL_FAST" == "1" ]]; then
-      return "$status"
-    fi
+    local rc=$?
+    echo "===== FAIL ${name}: exit=${rc}; continuing =====" >&2
+    ((FAILED += 1))
+    FAILED_CASES+=("${name} (exit=${rc})")
   fi
+
 }
 
-if [[ -n "${SGLANG_DLLM_EP_CASES:-}" ]]; then
-  IFS=';' read -r -a EP_CASES <<< "$SGLANG_DLLM_EP_CASES"
-  for case_cfg in "${EP_CASES[@]}"; do
-    read -r bs tp ep dp moe_a2a_backend <<< "$case_cfg"
-    if [[ -z "${moe_a2a_backend:-}" ]]; then
-      echo "Invalid EP case: '$case_cfg'. Expected: bs tp ep dp moe_a2a_backend" >&2
-      exit 1
-    fi
-    run_case "$bs" "$tp" "$ep" "$dp" "$moe_a2a_backend"
-  done
-else
-  for bs in "${BS_LIST[@]}"; do
-    for tp in "${TP_LIST[@]}"; do
-      for ep in "${EP_LIST[@]}"; do
-        for moe_a2a_backend in "${BACKEND_LIST[@]}"; do
-          run_case "$bs" "$tp" "$ep" "$DP_SIZE" "$moe_a2a_backend"
-        done
+for bs in ${BS_LIST}; do
+  for tp in ${TP_LIST}; do
+    for ep in ${EP_LIST}; do
+      for backend in ${BACKEND_LIST}; do
+        run_case "${bs}" "${tp}" "${ep}" "${backend}"
       done
     done
   done
-fi
+done
 
 echo
-echo "Done. CSV result: $CSV"
-echo "Case summary: total=$TOTAL_CASES passed=$PASSED_CASES failed=$FAILED_CASE_COUNT skipped=$SKIPPED_CASES"
-if (( FAILED_CASE_COUNT > 0 )); then
-  echo "Failed cases:" >&2
-  printf '  - %s\n' "${FAILED_CASES[@]}" >&2
+echo "Done: total=${TOTAL} passed=${PASSED} failed=${FAILED} skipped=${SKIPPED}"
+echo "CSV: ${CSV}"
+if (( FAILED > 0 )); then
+  printf '  failed: %s\n' "${FAILED_CASES[@]}" >&2
   exit 1
 fi

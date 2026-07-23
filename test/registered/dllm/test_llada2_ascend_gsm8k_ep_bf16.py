@@ -1,16 +1,8 @@
 import csv
 import os
-import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-
-THIS_FILE = Path(__file__).resolve()
-REPO_ROOT = THIS_FILE.parents[3]
-PYTHON_DIR = REPO_ROOT / "python"
-if str(PYTHON_DIR) not in sys.path:
-    sys.path.insert(0, str(PYTHON_DIR))
-os.environ["PYTHONPATH"] = f"{PYTHON_DIR}:{os.environ.get('PYTHONPATH', '')}"
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
@@ -23,7 +15,7 @@ from sglang.test.test_utils import (
     write_github_step_summary,
 )
 
-RESULT_DIR = THIS_FILE.parent
+RESULT_DIR = Path(__file__).resolve().parent
 DEFAULT_CSV_PATH = RESULT_DIR / "llada2_mini_ascend_results.csv"
 CSV_COLUMNS = [
     "run_name",
@@ -35,6 +27,8 @@ CSV_COLUMNS = [
     "dp",
     "moe_dp_size",
     "moe_a2a_backend",
+    "deepep_dispatch_dtype",
+    "random_seed",
     "max_running_requests",
     "model",
     "quantization",
@@ -62,8 +56,8 @@ def _env_bool(name, default=False):
     return value in ("1", "true", "yes", "on")
 
 
-def _env_list(name, default):
-    return _env(name, default).replace(",", " ").split()
+def _env_list(name):
+    return _env(name).replace(",", " ").split()
 
 
 def _env_path(name, default):
@@ -82,35 +76,12 @@ def _append_optional_arg(args, flag, value):
         args.extend([flag, value])
 
 
-def _set_runtime_env(name, dllm_name, default=""):
-    value = _env(dllm_name, default)
-    if value:
-        os.environ[name] = value
-    else:
-        os.environ.pop(name, None)
-
-
-def _clear_debug_envs_unless_kept():
-    if _env_bool("KEEP_DEBUG_ENVS", False):
-        return
-    for name in (
-        "SGLANG_NPU_DEEPEP_DEBUG_GRAPH_LOG",
-        "SGLANG_NPU_DEEPEP_EAGER_POST_MOE_GRAPH",
-        "SGLANG_NPU_PIECEWISE_EAGER_GRAPH",
-        "SGLANG_NPU_PIECEWISE_EAGER_FROM_GRAPH",
-        "SGLANG_NPU_PIECEWISE_EAGER_LAST_GRAPH",
-        "SGLANG_NPU_PIECEWISE_SYNC_REPLAY",
-        "SGLANG_NPU_DEEPEP_DISABLE_MOE_SPLIT",
-    ):
-        os.environ.pop(name, None)
-
-
 def _append_csv_row(row):
     csv_path = Path(_env("CSV", DEFAULT_CSV_PATH))
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     need_header = not csv_path.exists() or csv_path.stat().st_size == 0
-    with csv_path.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+    with csv_path.open("a", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=CSV_COLUMNS)
         if need_header:
             writer.writeheader()
         writer.writerow({key: row.get(key, "") for key in CSV_COLUMNS})
@@ -121,76 +92,51 @@ def _metric(metrics, key):
     if not metrics:
         return ""
     value = metrics.get(key, "")
-    if hasattr(value, "item"):
-        value = value.item()
-    return value
-
+    return value.item() if hasattr(value, "item") else value
 
 
 class TestLLaDA2(CustomTestCase):
     result_label = "bf16_ep"
-    default_model_size = "mini"
     model_paths = {
         "mini": "/data/public_models/LLaDA/LLaDA2.1-mini",
         "flash": "/data/public_models/LLaDA/LLaDA2.1-flash",
     }
-    default_tp = "4"
-    default_ep = "4"
-    default_dp = "1"
-    default_bs = 1
-    default_moe_a2a_backend = "deepep"
     quantization = ""
 
     @classmethod
     def setUpClass(cls):
-        os.environ.setdefault(
-            "ASCEND_RT_VISIBLE_DEVICES",
-            _env("ASCEND_RT_VISIBLE_DEVICES", "1,2,3,5"),
-        )
-        # _set_runtime_env("HCCL_BUFFSIZE", "HCCL_BUFFSIZE", "1024")
-        _set_runtime_env("SGLANG_DEBUG_GRAPH_CAN_RUN", "DEBUG_GRAPH_CAN_RUN", "0")
-        _set_runtime_env(
-            "SGLANG_NPU_DLLM_DEEPEP_PREFILL_GRAPH",
-            "NPU_DLLM_DEEPEP_PREFILL_GRAPH",
-            "1",
-        )
-        _set_runtime_env(
-            "SGLANG_NPU_PIECEWISE_STATIC_INPUT_COPY",
-            "NPU_PIECEWISE_STATIC_INPUT_COPY",
-            "1",
-        )
-        _set_runtime_env(
-            "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK",
-            "DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK",
-            "",
-        )
-        _set_runtime_env(
-            "SGLANG_DEEPEP_BF16_DISPATCH",
-            "DEEPEP_BF16_DISPATCH",
-            "",
-        )
-        _clear_debug_envs_unless_kept()
-
-        cls.model_size = _env("MODEL_SIZE", cls.default_model_size).lower()
+        cls.model_size = _env("MODEL_SIZE", "mini").lower()
         if cls.model_size not in cls.model_paths:
             raise ValueError(
                 f"Unsupported SGLANG_DLLM_MODEL_SIZE={cls.model_size!r}; "
                 "use mini or flash"
             )
+
         cls.model = _env("MODEL", cls.model_paths[cls.model_size])
         cls.base_url = DEFAULT_URL_FOR_TEST
-        cls.bs = _env_int("BS", cls.default_bs)
-        cls.tp = _env("TP", cls.default_tp)
-        cls.ep = _env("EP", cls.default_ep)
-        cls.dp = _env("DP", cls.default_dp)
-        cls.moe_dp_size = _env("MOE_DP_SIZE", "1")
-        cls.moe_a2a_backend = _env(
-            "MOE_A2A_BACKEND", cls.default_moe_a2a_backend
-        )
+        cls.bs = _env_int("BS", 1)
+        cls.tp = _env("TP", 2)
+        cls.ep = _env("EP", cls.tp)
+        cls.dp = _env("DP", 1)
+        cls.moe_dp_size = _env("MOE_DP_SIZE", 1)
+        cls.moe_a2a_backend = _env("MOE_A2A_BACKEND", "none")
+        cls.deepep_dispatch_dtype = _env("DEEPEP_DISPATCH_DTYPE", "auto")
+        cls.random_seed = _env("RANDOM_SEED", 0)
         cls.max_running_requests = _env("MAX_RUNNING_REQUESTS", cls.bs)
         cls.run_name = _env("RUN_NAME", cls.result_label)
         cls.bs_metrics = None
         cls.gsm8k_metrics = None
+
+        if cls.moe_a2a_backend == "deepep":
+            os.environ.setdefault("HCCL_BUFFSIZE", _env("HCCL_BUFFSIZE", "1024"))
+            capacity = _env("DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK", "")
+            if capacity:
+                os.environ["SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK"] = capacity
+            else:
+                os.environ.setdefault(
+                    "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK",
+                    str(int(cls.max_running_requests) * 32),
+                )
 
         other_args = [
             "--trust-remote-code",
@@ -200,9 +146,11 @@ class TestLLaDA2(CustomTestCase):
             "bfloat16",
             "--disable-radix-cache",
             "--mem-fraction-static",
-            _env("MEM_FRACTION_STATIC", "0.90"),
+            _env("MEM_FRACTION_STATIC", "0.80"),
             "--max-running-requests",
             str(cls.max_running_requests),
+            "--random-seed",
+            cls.random_seed,
             "--attention-backend",
             "ascend",
             "--tp",
@@ -214,36 +162,21 @@ class TestLLaDA2(CustomTestCase):
             "--moe-dp-size",
             cls.moe_dp_size,
         ]
+        if _env_bool("ENABLE_DP_ATTENTION"):
+            other_args.extend(["--enable-dp-attention", "--enable-dp-lm-head"])
         _append_optional_arg(other_args, "--moe-a2a-backend", cls.moe_a2a_backend)
-        _append_optional_arg(
-            other_args,
-            "--deepep-mode",
-            _env("DEEPEP_MODE", "auto" if cls.moe_a2a_backend == "deepep" else ""),
-        )
-        if _env_bool("ENABLE_PREFILL_GRAPH", cls.moe_a2a_backend == "deepep"):
+        decode_graph_bs = _env_list("CUDA_GRAPH_BS_DECODE")
+        if decode_graph_bs:
+            other_args.extend(["--cuda-graph-bs-decode", *decode_graph_bs])
+        if cls.moe_a2a_backend == "deepep":
+            _append_optional_arg(
+                other_args, "--deepep-mode", _env("DEEPEP_MODE", "")
+            )
             _append_optional_arg(
                 other_args,
-                "--cuda-graph-backend-prefill",
-                _env("CUDA_GRAPH_BACKEND_PREFILL", "tc_piecewise"),
+                "--deepep-dispatcher-output-dtype",
+                cls.deepep_dispatch_dtype,
             )
-            prefill_bs = _env_list("CUDA_GRAPH_BS_PREFILL", "32")
-            if prefill_bs:
-                other_args.extend(["--cuda-graph-bs-prefill", *prefill_bs])
-            _append_optional_arg(
-                other_args,
-                "--cuda-graph-tc-compiler",
-                _env("CUDA_GRAPH_TC_COMPILER", "eager"),
-            )
-        if _env_bool("ENABLE_PIECEWISE_GRAPH", False):
-            other_args.extend(
-                [
-                    "--piecewise-cuda-graph-compiler",
-                    _env("PIECEWISE_CUDA_GRAPH_COMPILER", "eager"),
-                ]
-            )
-            tokens = _env_list("PIECEWISE_CUDA_GRAPH_TOKENS", "32,64,96,128")
-            other_args.extend(["--piecewise-cuda-graph-tokens", *tokens])
-            other_args.append("--enforce-piecewise-cuda-graph")
         other_args.extend(
             [
                 "--dllm-algorithm",
@@ -253,7 +186,6 @@ class TestLLaDA2(CustomTestCase):
             ]
         )
 
-        print("LLaDA2 EP bf16 launch args:", " ".join(map(str, other_args)))
         cls.process = popen_launch_server(
             cls.model,
             cls.base_url,
@@ -282,6 +214,12 @@ class TestLLaDA2(CustomTestCase):
                 "dp": cls.dp,
                 "moe_dp_size": cls.moe_dp_size,
                 "moe_a2a_backend": cls.moe_a2a_backend,
+                "deepep_dispatch_dtype": (
+                    cls.deepep_dispatch_dtype
+                    if cls.moe_a2a_backend == "deepep"
+                    else ""
+                ),
+                "random_seed": cls.random_seed,
                 "max_running_requests": cls.max_running_requests,
                 "model": cls.model,
                 "quantization": cls.quantization,
@@ -297,7 +235,7 @@ class TestLLaDA2(CustomTestCase):
                 ),
             }
         )
-        print(f"LLaDA2 mini Ascend CSV updated: {csv_path}")
+        print(f"LLaDA2 {cls.model_size} Ascend CSV updated: {csv_path}")
 
     def test_gsm8k(self):
         args = SimpleNamespace(
@@ -326,10 +264,9 @@ class TestLLaDA2(CustomTestCase):
             different_prompts=_env_bool("DIFFERENT_PROMPTS", self.bs > 1),
             max_new_tokens=_env_int("BS_MAX_NEW_TOKENS", 2048),
         )
-        bs_metrics = send_one_prompt(args, return_metrics=True)
-        type(self).bs_metrics = bs_metrics
-        speed = bs_metrics["speed"]
-
+        cls = type(self)
+        cls.bs_metrics = send_one_prompt(args, return_metrics=True)
+        speed = cls.bs_metrics["speed"]
         print(f"{speed=:.2f}")
 
         if is_in_ci():

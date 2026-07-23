@@ -142,10 +142,17 @@ class JointThreshold(DllmAlgorithm):
             else None
         )
 
-        def any_dp_rank_active(local_active: bool) -> bool:
+        def any_dp_rank_active(local_active: bool | torch.Tensor) -> bool:
             if not sync_dp_iterations:
-                return local_active
-            dp_active_flag.fill_(int(local_active))
+                return (
+                    bool(local_active.item())
+                    if isinstance(local_active, torch.Tensor)
+                    else local_active
+                )
+            if isinstance(local_active, torch.Tensor):
+                dp_active_flag.copy_(local_active)
+            else:
+                dp_active_flag.fill_(int(local_active))
             torch.distributed.all_reduce(
                 dp_active_flag,
                 op=torch.distributed.ReduceOp.MAX,
@@ -205,7 +212,7 @@ class JointThreshold(DllmAlgorithm):
 
         max_iterations = self.block_size + self.max_post_edit_steps
         for _ in range(max_iterations):
-            local_active = local_has_mask and not bool(finished.all())
+            local_active = (~finished).any() & local_has_mask
             if not any_dp_rank_active(local_active):
                 break
             out = model_runner.forward(
@@ -216,7 +223,7 @@ class JointThreshold(DllmAlgorithm):
             skip_attn_backend_init = True
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
 
-            if not local_active:
+            if not local_has_mask:
                 continue
 
             if self.vectorized_decoding:
@@ -233,7 +240,7 @@ class JointThreshold(DllmAlgorithm):
                     self.max_post_edit_steps,
                     self.penalty_lambda,
                 )
-                any_changed_in_last_step = changed_any.item()
+                any_changed_in_last_step = changed_any
                 continue
 
             # ---------- original non-vectorized path ----------
@@ -298,9 +305,12 @@ class JointThreshold(DllmAlgorithm):
                 any_changed_in_last_step = True
 
         # ---------- extra forward ----------
-        extra_forward = any_dp_rank_active(
-            local_has_mask and any_changed_in_last_step
+        local_extra_forward = (
+            any_changed_in_last_step
+            if local_has_mask
+            else False
         )
+        extra_forward = any_dp_rank_active(local_extra_forward)
         if extra_forward:
             out = model_runner.forward(
                 forward_batch, skip_attn_backend_init, pp_proxy_tensors=None

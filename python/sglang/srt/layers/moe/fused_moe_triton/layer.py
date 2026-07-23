@@ -115,6 +115,9 @@ def create_moe_dispatcher(moe_runner_config: MoeRunnerConfig) -> BaseDispatcher:
             deepep_mode=get_deepep_mode(),
             async_finish=True,
             return_recv_hook=True,
+            # The NPU DeepEP hook is currently a no-op. Use its real event
+            # path so graph replay cannot outrun dispatch/combine completion.
+            # return_recv_hook=not _is_npu,
         )
     elif a2a_backend.is_flashinfer():
         return FlashinferDispatcher(

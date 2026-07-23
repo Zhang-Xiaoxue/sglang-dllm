@@ -92,15 +92,21 @@ class NPUPiecewiseBackend(CUDAPiecewiseBackend):
             and not self._is_stable_model_tensor_arg(index)
         )
 
-    def _copy_static_arg(self, dst: torch.Tensor, src: torch.Tensor, stream=None) -> None:
+    def _copy_static_args(
+        self, copies: list[tuple[torch.Tensor, torch.Tensor]], stream=None
+    ) -> None:
+        if not copies:
+            return
         if stream is None:
-            dst.copy_(src)
+            for dst, src in copies:
+                dst.copy_(src)
             return
 
         current_stream = torch.npu.current_stream()
         stream.wait_stream(current_stream)
         with torch.npu.stream(stream):
-            dst.copy_(src)
+            for dst, src in copies:
+                dst.copy_(src)
         current_stream.wait_stream(stream)
 
     def _prepare_static_args(
@@ -111,6 +117,7 @@ class NPUPiecewiseBackend(CUDAPiecewiseBackend):
         if static_args is None:
             static_args_list = list(args)
             static_tensor_indices = []
+            copies = []
             for index, value in enumerate(args):
                 if not self._should_static_copy_arg(index, value):
                     continue
@@ -120,15 +127,18 @@ class NPUPiecewiseBackend(CUDAPiecewiseBackend):
                     dtype=value.dtype,
                     device=value.device,
                 )
-                self._copy_static_arg(static_value, value, stream)
+                copies.append((static_value, value))
                 static_args_list[index] = static_value
                 static_tensor_indices.append(index)
+            self._copy_static_args(copies, stream)
             static_args = tuple(static_args_list)
             entry.static_args = static_args
             entry.static_tensor_indices = static_tensor_indices
         else:
-            for index in static_tensor_indices:
-                self._copy_static_arg(static_args[index], args[index], stream)
+            self._copy_static_args(
+                [(static_args[index], args[index]) for index in static_tensor_indices],
+                stream,
+            )
         return static_args
 
     @staticmethod
@@ -222,6 +232,7 @@ class NPUPiecewiseBackend(CUDAPiecewiseBackend):
             # manage the memory during cuda graph capture
             return output
 
+        static_args = None
         if self.compile_config.get_enable_debug_mode():
             # check if the input addresses are the same
             static_args = self._prepare_static_args(
@@ -262,13 +273,23 @@ class NPUPiecewiseBackend(CUDAPiecewiseBackend):
                 self._debug_eager_graph_log_count = count + 1
             return entry.runnable(*args)
 
-        self._prepare_static_args(entry, args, getattr(entry, "capture_stream", None))
+        if static_args is None:
+            self._prepare_static_args(
+                entry, args, getattr(entry, "capture_stream", None)
+            )
         if envs.SGLANG_NPU_PIECEWISE_SYNC_REPLAY.get():
             # Keep eager split ops, such as DeepEP dispatch/combine, ordered with graph segments.
             torch.npu.synchronize()
         entry.cudagraph.replay()
         if envs.SGLANG_NPU_PIECEWISE_SYNC_REPLAY.get():
             torch.npu.synchronize()
+        else:
+            capture_stream = getattr(entry, "capture_stream", None)
+            if capture_stream is not None:
+                # NPUGraph replays on its capture stream.  Piecewise graph outputs
+                # may be consumed immediately by eager split ops (notably DeepEP),
+                # so establish a device-side dependency without a host/device sync.
+                torch.npu.current_stream().wait_stream(capture_stream)
         if envs.SGLANG_NPU_DEEPEP_DEBUG_GRAPH_LOG.get():
             count = getattr(self, "_debug_replay_output_log_count", 0)
             should_log = (

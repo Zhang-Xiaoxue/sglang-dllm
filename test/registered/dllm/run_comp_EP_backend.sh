@@ -2,45 +2,27 @@
 set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-status=0
 
-export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
-echo "ASCEND_RT_VISIBLE_DEVICES=$ASCEND_RT_VISIBLE_DEVICES"
+# Comparison matrix. These are the only settings normally worth editing.
+DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0,5,6,7}
+CSV=${SGLANG_DLLM_EP_CSV:-llada2_deepep_vs_none_full_matrix.csv}
+MODEL_SIZE=${SGLANG_DLLM_MODEL_SIZE:-mini}
+BS_LIST=${SGLANG_DLLM_EP_BS_LIST:-"1 4 8 16 32 64 128 256"}
+TP_LIST=${SGLANG_DLLM_EP_TP_LIST:-"4 2 1"}
+EP_LIST=${SGLANG_DLLM_EP_SIZE_LIST:-"4 2 1"}
+BACKEND_LIST=${SGLANG_DLLM_EP_BACKEND_LIST:-"deepep none"}
 
-run_matrix() {
-  local csv=$1
-  local model_size=$2
-  shift 2
+export ASCEND_RT_VISIBLE_DEVICES=${DEVICES}
 
-  echo
-  echo "===== EP backend matrix: model_size=${model_size}, csv=${csv} ====="
-  if "$@"; then
-    echo "===== PASS matrix: model_size=${model_size} ====="
-  else
-    local rc=$?
-    echo "===== FAIL matrix: model_size=${model_size} exit=${rc}; continuing =====" >&2
-    status=$rc
-  fi
-}
+echo "===== LLaDA2 EP backend comparison ====="
+echo "devices=${DEVICES} model=${MODEL_SIZE}"
+echo "bs=[${BS_LIST}] tp=[${TP_LIST}] ep=[${EP_LIST}]"
+echo "backends=[${BACKEND_LIST}] csv=${CSV}"
 
-# run_matrix llada2_gsm8k_ep_test_mini_0716_zxx.csv mini \
-#   env \
-#     SGLANG_DLLM_EP_BS_LIST="256" \
-#     SGLANG_DLLM_EP_TP_LIST="8 4 2 1" \
-#     SGLANG_DLLM_EP_SIZE_LIST="8 4 2 1" \
-#     SGLANG_DLLM_EP_BACKEND_LIST="none" \
-#     SGLANG_DLLM_MEM_FRACTION_STATIC="0.7" \
-#     SGLANG_DLLM_BS_MAX_NEW_TOKENS="512" \
-#     bash "$SCRIPT_DIR/run_llada2_ascend_gsm8k_EP_test_csv.sh" llada2_gsm8k_ep_test_mini_0716_zxx.csv mini
-
-run_matrix llada2_gsm8k_ep_test_flash_0716_zxx_none.csv flash \
- env \
-    SGLANG_DLLM_EP_BS_LIST="1 4 8 16 32 64 128 256" \
-    SGLANG_DLLM_EP_TP_LIST="8 4 2 1" \
-    SGLANG_DLLM_EP_SIZE_LIST="8 4 2 1" \
-    SGLANG_DLLM_EP_BACKEND_LIST="none" \
-    SGLANG_DLLM_MEM_FRACTION_STATIC="0.8" \
-    SGLANG_DLLM_BS_MAX_NEW_TOKENS="512" \
-   bash "$SCRIPT_DIR/run_llada2_ascend_gsm8k_EP_test_csv.sh" llada2_gsm8k_ep_test_flash_0716_zxx_none.csv flash
-
-exit "$status"
+exec env \
+  SGLANG_DLLM_EP_BS_LIST="${BS_LIST}" \
+  SGLANG_DLLM_EP_TP_LIST="${TP_LIST}" \
+  SGLANG_DLLM_EP_SIZE_LIST="${EP_LIST}" \
+  SGLANG_DLLM_EP_BACKEND_LIST="${BACKEND_LIST}" \
+  bash "${SCRIPT_DIR}/run_llada2_ascend_gsm8k_EP_test_csv.sh" \
+    "${CSV}" "${MODEL_SIZE}"
