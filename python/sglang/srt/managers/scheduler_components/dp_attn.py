@@ -258,6 +258,7 @@ def prepare_mlp_sync_batch_raw(
         local_batch is None
         or local_batch.forward_mode.is_decode_or_idle()
         or local_batch.forward_mode.is_prebuilt()
+        or local_batch.forward_mode.is_dllm_extend()
     ) and not disable_cuda_graph
     # Idle/None ranks are permissive (like can_cuda_graph): the all-gather
     # min()-reduces this across DP ranks, so a prefill batch with idle ranks

@@ -22,7 +22,7 @@ from sglang.srt.distributed.device_communicators.pynccl_allocator import (
 )
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_location import get_global_expert_location_metadata
-from sglang.srt.layers.dp_attention import is_allocation_symmetric
+from sglang.srt.layers.dp_attention import is_allocation_symmetric, set_is_extend_in_batch
 from sglang.srt.layers.moe import (
     MoeRunnerConfig,
     get_deepep_mode,
@@ -131,6 +131,9 @@ def create_moe_dispatcher(moe_runner_config: MoeRunnerConfig) -> BaseDispatcher:
             deepep_mode=get_deepep_mode(),
             async_finish=True,
             return_recv_hook=True,
+            # The NPU DeepEP hook is currently a no-op. Use its real event
+            # path so graph replay cannot outrun dispatch/combine completion.
+            # return_recv_hook=not _is_npu,
         )
     elif a2a_backend.is_flashinfer():
         return FlashinferDispatcher(
@@ -1503,6 +1506,11 @@ def moe_forward_piecewise_cuda_graph_impl(
         topk_weights=topk_weights, topk_ids=topk_ids, router_logits=router_logits
     )
     forward_context = get_tc_piecewise_forward_context()
+    if forward_context is not None and forward_context.forward_batch is not None:
+        forward_batch = forward_context.forward_batch
+        set_is_extend_in_batch(
+            forward_batch.is_extend_in_batch or forward_batch.forward_mode.is_extend()
+        )
     moe_layer = forward_context.moe_layers[layer_id]
     return moe_layer.forward_impl(hidden_states, topk_output)
 

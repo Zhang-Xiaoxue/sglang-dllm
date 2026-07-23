@@ -1473,6 +1473,22 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             self.batch_size = self._original_batch_size
         bs = self.batch_size
 
+        if self.forward_mode.is_dllm_extend():
+            num_tokens = self.num_token_non_padded_cpu
+            self.input_ids = self.input_ids[:num_tokens]
+            self.positions = self.positions[:num_tokens]
+            self.out_cache_loc = self.out_cache_loc[:num_tokens]
+            self.extend_num_tokens = num_tokens
+            if logits_output.full_logits is not None:
+                logits_output.full_logits = logits_output.full_logits[:num_tokens]
+            if logits_output.hidden_states is not None:
+                logits_output.hidden_states = logits_output.hidden_states[:num_tokens]
+            if logits_output.next_token_logits is not None:
+                logits_output.next_token_logits = logits_output.next_token_logits[
+                    :num_tokens
+                ]
+            return
+
         if self.spec_info is not None:
             if self.forward_mode.is_decode():  # draft
                 num_tokens = self.hidden_states_backup.shape[0]

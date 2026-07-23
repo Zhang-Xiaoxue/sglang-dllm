@@ -29,7 +29,6 @@ from transformers import PretrainedConfig
 
 from sglang.srt.distributed import (
     get_pp_group,
-    parallel_state,
     tensor_model_parallel_all_reduce,
 )
 from sglang.srt.environ import envs
@@ -53,13 +52,11 @@ from sglang.srt.layers.linear import (
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.moe import (
-    get_deepep_mode,
     get_moe_a2a_backend,
     should_skip_post_experts_all_reduce,
 )
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
-from sglang.srt.layers.moe.token_dispatcher import DeepEPDispatcher
 from sglang.srt.layers.moe.topk import TopK
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import AttentionType, RadixAttention
@@ -71,6 +68,9 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_executor.runner import get_is_capture_mode
+from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
+    is_in_tc_piecewise_cuda_graph,
+)
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.utils import (
     apply_qk_norm,
@@ -294,6 +294,7 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             prefix=add_prefix("experts", prefix),
         )
+        self._shared_expert_tp1 = False
         # shared expert
         if config.num_shared_experts is not None:
             if hasattr(config, "moe_shared_expert_intermediate_size"):
@@ -301,7 +302,10 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
             else:
                 intermediate_size = config.moe_intermediate_size
             intermediate_size *= config.num_shared_experts
-            # disable tp for shared experts when enable deepep moe
+            self._shared_expert_tp1 = (
+                get_moe_a2a_backend().is_deepep()
+                or envs.SGLANG_SHARED_EXPERT_TP1.get()
+            )
             self.shared_experts = LLaDA2MoeMLP(
                 intermediate_size=intermediate_size,
                 config=config,
@@ -309,27 +313,8 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
                 reduce_results=False,
                 prefix=add_prefix("shared_experts", prefix),
                 **(
-                    dict(tp_rank=0, tp_size=1)
-                    if get_moe_a2a_backend().is_deepep()
-                    else {}
+                    dict(tp_rank=0, tp_size=1) if self._shared_expert_tp1 else {}
                 ),
-            )
-        # dispatcher
-        if get_moe_a2a_backend().is_deepep():
-            # TODO: we will support tp < ep in the future
-            self.ep_size = get_parallel().tp_size
-
-            self.deepep_dispatcher = DeepEPDispatcher(
-                group=parallel_state.get_tp_group().device_group,
-                router_topk=self.top_k,
-                permute_fusion=True,
-                num_experts=self.num_experts,
-                num_local_experts=config.num_experts // self.tp_size,
-                hidden_size=config.hidden_size,
-                params_dtype=config.torch_dtype,
-                deepep_mode=get_deepep_mode(),
-                async_finish=True,  # TODO
-                return_recv_hook=True,
             )
 
     def forward(
@@ -375,6 +360,20 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
 
         return router_output, shared_output
 
+    def forward_normal_dual_stream_npu(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        current_stream = torch.npu.current_stream()
+        self.alt_stream.wait_stream(current_stream)
+        shared_output = self._forward_shared_experts(hidden_states.clone())
+
+        with torch.npu.stream(self.alt_stream):
+            router_output = self._forward_router_experts(hidden_states)
+        current_stream.wait_stream(self.alt_stream)
+
+        return router_output, shared_output
+
     def forward_normal(
         self,
         hidden_states: torch.Tensor,
@@ -387,20 +386,27 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
             and hidden_states.shape[0] > 0
             and get_is_capture_mode()
         ):
-            final_hidden_states, shared_output = self.forward_normal_dual_stream(
-                hidden_states
-            )
+            if _is_npu:
+                final_hidden_states, shared_output = (
+                    self.forward_normal_dual_stream_npu(hidden_states)
+                )
+            else:
+                final_hidden_states, shared_output = self.forward_normal_dual_stream(
+                    hidden_states
+                )
         else:
             shared_output = self._forward_shared_experts(hidden_states)
             final_hidden_states = self._forward_router_experts(hidden_states)
 
-        if self.num_shared_experts > 0:
+        if self.num_shared_experts > 0 and not self._shared_expert_tp1:
             final_hidden_states = final_hidden_states + shared_output
 
         if self.tp_size > 1 and not should_skip_post_experts_all_reduce(
             is_tp_path=True,
         ):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+        if self.num_shared_experts > 0 and self._shared_expert_tp1:
+            final_hidden_states = final_hidden_states + shared_output
         return final_hidden_states.view(num_tokens, hidden_size)
 
     def forward_deepep(
@@ -411,7 +417,7 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
         if is_non_idle_and_non_empty(forward_mode, hidden_states):
             router_logits = self.gate(hidden_states)
             if self.num_shared_experts > 0:
-                shared_output = self.shared_experts(hidden_states)
+                shared_output = self._forward_shared_experts(hidden_states)
 
             topk_output = self.topk(
                 hidden_states,
@@ -549,7 +555,10 @@ class LLaDA2MoeAttention(nn.Module):
         if hidden_states.shape[0] == 0:
             return hidden_states
         qkv, _ = self.query_key_value(hidden_states)
-        if self._use_fused_qkv(hidden_states.shape[0]):
+        if (
+            self._use_fused_qkv(hidden_states.shape[0])
+            and not is_in_tc_piecewise_cuda_graph()
+        ):
             q, k, v = split_qkv_rmsnorm_rope_pos_cache_half_npu(
                 qkv,
                 positions,

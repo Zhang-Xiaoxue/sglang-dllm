@@ -161,6 +161,8 @@ class DeepEPMoE(FusedMoE):
         topk_output: TopKOutput,
     ):
         if is_in_tc_piecewise_cuda_graph():
+            if _is_npu and envs.SGLANG_NPU_DEEPEP_DISABLE_MOE_SPLIT.get():
+                return self.forward_impl(hidden_states, topk_output)
             assert TopKOutputChecker.format_is_standard(
                 topk_output
             ), "Only standard topk output is supported for piecewise cuda graph"

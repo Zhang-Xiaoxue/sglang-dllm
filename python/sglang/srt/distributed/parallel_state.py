@@ -960,26 +960,35 @@ class GroupCoordinator:
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
 
+        if sizes is not None:
+            assert len(sizes) == world_size
+            assert input_.shape[0] == sum(sizes)
+            chunk_size = sizes[self.rank_in_group]
+        else:
+            assert input_.shape[0] % world_size == 0
+            chunk_size = input_.shape[0] // world_size
+        output_shape = (chunk_size,) + input_.shape[1:]
+
+        if output is None:
+            output = torch.empty(output_shape, dtype=input_.dtype, device=input_.device)
+        else:
+            assert output.shape == output_shape
+
+        if _is_npu:
+            if sizes is None or all(size == sizes[0] for size in sizes):
+                torch.distributed.reduce_scatter_tensor(
+                    output, input_, group=self.device_group
+                )
+            else:
+                torch.distributed.all_reduce(input_, group=self.device_group)
+                start = sum(sizes[: self.rank_in_group])
+                output.copy_(input_.narrow(0, start, chunk_size))
+            return output
+
         with pynccl_comm.change_state(enable=True):
             assert (
                 pynccl_comm is not None and not pynccl_comm.disabled
             ), "pynccl is required for reduce_scatterv"
-
-            if sizes is not None:
-                assert len(sizes) == world_size
-                assert input_.shape[0] == sum(sizes)
-                chunk_size = sizes[self.rank_in_group]
-            else:
-                assert input_.shape[0] % world_size == 0
-                chunk_size = input_.shape[0] // world_size
-            output_shape = (chunk_size,) + input_.shape[1:]
-
-            if output is None:
-                output = torch.empty(
-                    output_shape, dtype=input_.dtype, device=input_.device
-                )
-            else:
-                assert output.shape == output_shape
 
             pynccl_comm.reduce_scatter(output, input_, sizes=sizes)
             return output

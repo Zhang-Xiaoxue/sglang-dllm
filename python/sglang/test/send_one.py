@@ -119,6 +119,7 @@ def send_one_prompt(
     args: BenchArgs,
     label: Optional[str] = None,
     print_output: bool = True,
+    return_metrics: bool = False,
 ):
     base_url = resolve_base_url(args.base_url, args.host, args.port)
 
@@ -230,24 +231,42 @@ def send_one_prompt(
     else:
         ret = response.json()
 
-    if args.batch_size > 1:
+    raw_ret = ret
+    if args.batch_size > 1 and isinstance(ret, list):
         ret = ret[0]
 
     if response.status_code != 200:
         print(ret)
+        if return_metrics:
+            return {"latency": 0, "tokens": 0, "acc_length": 0, "speed": 0}
         return 0, 0
 
     # Print results
-    if "spec_verify_ct" in ret["meta_info"] and ret["meta_info"]["spec_verify_ct"] > 0:
-        acc_length = (
-            ret["meta_info"]["completion_tokens"] / ret["meta_info"]["spec_verify_ct"]
-        )
+    if return_metrics and isinstance(raw_ret, list):
+        meta_infos = [item["meta_info"] for item in raw_ret]
+        latency = max(meta_info["e2e_latency"] for meta_info in meta_infos)
+        tokens = sum(meta_info["completion_tokens"] for meta_info in meta_infos)
+        acc_lengths = []
+        for meta_info in meta_infos:
+            spec_verify_ct = meta_info.get("spec_verify_ct", 0)
+            if spec_verify_ct > 0:
+                acc_lengths.append(meta_info["completion_tokens"] / spec_verify_ct)
+            else:
+                acc_lengths.append(1.0)
+        acc_length = sum(acc_lengths) / len(acc_lengths)
     else:
-        acc_length = 1.0
+        if "spec_verify_ct" in ret["meta_info"] and ret["meta_info"]["spec_verify_ct"] > 0:
+            acc_length = (
+                ret["meta_info"]["completion_tokens"]
+                / ret["meta_info"]["spec_verify_ct"]
+            )
+        else:
+            acc_length = 1.0
 
-    latency = ret["meta_info"]["e2e_latency"]
-    speed = ret["meta_info"]["completion_tokens"] / latency
-    tokens = ret["meta_info"]["completion_tokens"]
+        latency = ret["meta_info"]["e2e_latency"]
+        tokens = ret["meta_info"]["completion_tokens"]
+
+    speed = tokens / latency if latency > 0 else 0
 
     if not args.stream and print_output:
         print(ret["text"])
@@ -259,6 +278,14 @@ def send_one_prompt(
     rows = [[f"{latency:.3f}", f"{tokens}", f"{acc_length:.3f}", f"{speed:.2f}"]]
     msg = tabulate.tabulate(rows, headers=headers, tablefmt="pretty")
     print(msg)
+
+    if return_metrics:
+        return {
+            "latency": latency,
+            "tokens": tokens,
+            "acc_length": acc_length,
+            "speed": speed,
+        }
 
     return acc_length, speed
 

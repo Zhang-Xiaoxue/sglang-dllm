@@ -601,6 +601,15 @@ class Envs:
     SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT = EnvBool(False)
     SGLANG_NPU_USE_MULTI_STREAM = EnvBool(False)
     SGLANG_NPU_USE_MLAPO = EnvBool(False)
+    SGLANG_NPU_DLLM_DEEPEP_PREFILL_GRAPH = EnvBool(False)
+    SGLANG_NPU_DEEPEP_DEBUG_GRAPH_LOG = EnvBool(False)
+    SGLANG_NPU_DEEPEP_DISABLE_MOE_SPLIT = EnvBool(False)
+    SGLANG_NPU_PIECEWISE_SYNC_REPLAY = EnvBool(False)
+    SGLANG_NPU_PIECEWISE_EAGER_LAST_GRAPH = EnvBool(False)
+    SGLANG_NPU_PIECEWISE_EAGER_FROM_GRAPH = EnvInt(0)
+    SGLANG_NPU_PIECEWISE_EAGER_GRAPH = EnvInt(0)
+    SGLANG_NPU_DEEPEP_EAGER_POST_MOE_GRAPH = EnvBool(False)
+    SGLANG_NPU_PIECEWISE_STATIC_INPUT_COPY = EnvBool(True)
     # Forward native implementation for activation gelu tanh for model Skywork-Reward-Gemma-2-27B-v0.2
     SGLANG_NPU_FORWARD_NATIVE_GELUTANH = EnvBool(False)
     # Forward native implementation for gemma rms norm for model Skywork-Reward-Gemma-2-27B-v0.2

@@ -51,8 +51,16 @@ class AscendTPDispatcher(BaseDispatcher):
     def __init__(self, moe_runner_config: MoeRunnerConfig):
         super().__init__()
         self.num_experts = moe_runner_config.num_experts
+        self.num_local_experts = moe_runner_config.num_local_experts
+        self.num_local_shared_experts = moe_runner_config.num_fused_shared_experts
+        self.num_local_routed_experts = (
+            self.num_local_experts - self.num_local_shared_experts
+        )
+        self.moe_ep_size = get_parallel().moe_ep_size
+        self.moe_ep_rank = get_parallel().moe_ep_rank
         self.top_k = moe_runner_config.top_k
         self._dispatch_output: Optional[AscendTPDispatchOutput] = None
+        self.local_expert_mapping: Optional[torch.Tensor] = None
 
         self.quant_config: Optional[dict] = None
 
@@ -89,12 +97,68 @@ class AscendTPDispatcher(BaseDispatcher):
                 f"Unsupported ascend_dispatcher_output_dtype: {self.ascend_dispatcher_output_dtype}"
             )
 
+    def _get_local_expert_mapping(self, device: torch.device) -> torch.Tensor:
+        if (
+            self.local_expert_mapping is not None
+            and self.local_expert_mapping.device == device
+        ):
+            return self.local_expert_mapping
+
+        mapping = torch.full(
+            (self.num_experts,), -1, dtype=torch.int64, device=device
+        )
+        local_start = self.moe_ep_rank * self.num_local_routed_experts
+        local_end = local_start + self.num_local_routed_experts
+        mapping[local_start:local_end] = torch.arange(
+            0, self.num_local_routed_experts, dtype=torch.int64, device=device
+        )
+
+        if self.num_local_shared_experts > 0:
+            mapping[-self.num_local_shared_experts :] = torch.arange(
+                self.num_local_routed_experts,
+                self.num_local_routed_experts + self.num_local_shared_experts,
+                dtype=torch.int64,
+                device=device,
+            )
+
+        self.local_expert_mapping = mapping
+        return mapping
+
+    def _map_topk_ids_to_local(
+        self, topk_ids: torch.Tensor, topk_weights: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        topk_ids = topk_ids.to(torch.int64)
+
+        if self.moe_ep_size > 1:
+            mapping = self._get_local_expert_mapping(topk_ids.device)
+            valid_global = (topk_ids >= 0) & (topk_ids < self.num_experts)
+            safe_global_ids = torch.where(
+                valid_global, topk_ids, torch.zeros_like(topk_ids)
+            )
+            local_topk_ids = mapping[safe_global_ids]
+        else:
+            valid_global = (topk_ids >= 0) & (topk_ids < self.num_local_experts)
+            local_topk_ids = topk_ids
+
+        valid_local = (
+            valid_global
+            & (local_topk_ids >= 0)
+            & (local_topk_ids < self.num_local_experts)
+        )
+        local_topk_ids = torch.where(
+            valid_local, local_topk_ids, torch.zeros_like(local_topk_ids)
+        )
+        topk_weights = torch.where(
+            valid_local, topk_weights, torch.zeros_like(topk_weights)
+        )
+        return local_topk_ids.to(torch.int32), topk_weights
+
     def dispatch(
         self, hidden_states: torch.Tensor, topk_output: TopKOutput
     ) -> AscendTPDispatchOutput:
         topk_weights, topk_ids, _ = topk_output
         topk_weights = topk_weights.to(hidden_states.dtype)
-        topk_ids = topk_ids.to(torch.int32)
+        topk_ids, topk_weights = self._map_topk_ids_to_local(topk_ids, topk_weights)
 
         (
             permuted_hidden_states,
@@ -104,7 +168,7 @@ class AscendTPDispatcher(BaseDispatcher):
         ) = self.init._init_routing(
             hidden_states,
             topk_ids,
-            self.num_experts,
+            self.num_local_experts,
             self.top_k,
         )
 

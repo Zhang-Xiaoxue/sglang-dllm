@@ -1129,6 +1129,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                     if self.model_runner.spec_algorithm.is_eagle()
                     or self.model_runner.spec_algorithm.is_standalone()
                     or self.model_runner.spec_algorithm.is_dflash_family()
+                    or self.is_dllm
                     else max_num_tokens
                 )
                 bs = self._pad_to_bucket(int(max_batch_size), self.capture_bs)

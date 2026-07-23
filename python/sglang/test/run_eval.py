@@ -260,10 +260,17 @@ def run_eval(args):
     elif args.eval_name == "gpqa":
         from sglang.test.simple_eval_gpqa import GPQAEval
 
-        filename = (
+        filename = getattr(args, "gpqa_data_path", None) or (
             "https://openaipublic.blob.core.windows.net/simple-evals/gpqa_diamond.csv"
         )
         eval_obj = GPQAEval(filename, args.num_examples, args.num_threads)
+    elif args.eval_name == "piqa":
+        from sglang.test.simple_eval_piqa import PIQAEval
+
+        filename = getattr(args, "piqa_data_path", None)
+        if not filename:
+            raise ValueError("--piqa-data-path is required for eval_name=piqa")
+        eval_obj = PIQAEval(filename, args.num_examples, args.num_threads)
     elif args.eval_name == "humaneval":
         from sglang.test.simple_eval_humaneval import HumanEval
 
@@ -517,6 +524,18 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Path to GSM8K data file (e.g., test.jsonl)",
+    )
+    parser.add_argument(
+        "--gpqa-data-path",
+        type=str,
+        default=None,
+        help="Optional path to GPQA CSV. Defaults to the OpenAI public gpqa_diamond.csv.",
+    )
+    parser.add_argument(
+        "--piqa-data-path",
+        type=str,
+        default=None,
+        help="Path to PIQA JSONL/CSV/JSON file or dataset directory.",
     )
     parser.add_argument(
         "--mixed-prefix-gsm8k-secondary-pool-size",

@@ -286,3 +286,13 @@ artifacts/
 
 # Internal, non-published docs
 internal-docs/
+
+**/kernel_meta
+**/results
+**/profiles
+results/
+kernel_meta/
+
+extra-info/
+
+logs/

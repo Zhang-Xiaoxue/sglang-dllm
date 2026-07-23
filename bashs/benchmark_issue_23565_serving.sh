@@ -1,0 +1,13 @@
+python3 -m sglang.bench_serving \
+    --port 8188 \
+    --dataset-name generated-shared-prefix \
+    --num-prompts 32 \
+    --gsp-num-groups 1 \
+    --gsp-prompts-per-group 32 \
+    --gsp-system-prompt-len 0 \
+    --gsp-question-len 4096 \
+    --gsp-output-len 1536 \
+    --request-rate 100 \
+    --max-concurrency 1 \
+    --flush-cache \
+    --output-details

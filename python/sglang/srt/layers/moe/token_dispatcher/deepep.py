@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import logging
+import os
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, NamedTuple, Optional, Tuple, Union
@@ -10,6 +12,9 @@ from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.dp_attention import get_is_extend_in_batch
+from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
+    get_tc_piecewise_forward_context,
+)
 from sglang.srt.layers.moe.token_dispatcher.base import (
     BaseDispatcher,
     BaseDispatcherConfig,
@@ -27,6 +32,7 @@ from sglang.srt.layers.moe.utils import (
     get_deepep_output_dtype,
     is_tbo_enabled,
 )
+from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
     get_bool_env_var,
     get_cuda_version,
@@ -58,6 +64,15 @@ try:
 except ImportError:
     use_deepep = False
 
+_supports_deepep_quant_mode = False
+if use_deepep:
+    try:
+        _supports_deepep_quant_mode = (
+            "quant_mode" in inspect.signature(Buffer.low_latency_dispatch).parameters
+        )
+    except (TypeError, ValueError):
+        pass
+
 from enum import Enum, IntEnum, auto
 
 import torch
@@ -84,6 +99,17 @@ def _deepep_precompile_tp_barrier() -> None:
     # We apply this barrier only in the compile stage to prevent extra all-reduce overhead at runtime.
     if envs.SGLANG_IN_DEEPGEMM_PRECOMPILE_STAGE.get():
         get_tp_group().barrier()
+
+
+def _wait_deepep_event(event) -> None:
+    if _is_npu:
+        # Older sgl-kernel-npu packages expose EventHandle here while leaving
+        # EventOverlap.current_stream_wait() as a no-op.
+        event_handle = getattr(event, "event", None)
+        if event_handle is not None:
+            event_handle.current_stream_wait()
+            return
+    event.current_stream_wait()
 
 
 class DeepEPPDispatchHooks(DispatcherBaseHooks):
@@ -363,6 +389,7 @@ class _DeepEPDispatcherImplBase:
             )
 
         self.group = group
+        self.group_size = group.size()
         self.router_topk = router_topk
         self.permute_fusion = permute_fusion
         self.num_experts = num_experts
@@ -621,7 +648,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
 
     def combine_b(self, output, previous_event):
         hidden_states, event = self._combine_core(output, previous_event)
-        event.current_stream_wait() if self.async_finish else ()
+        _wait_deepep_event(event) if self.async_finish else ()
         self.handle = None
         self.src2dst = None
         return hidden_states
@@ -656,6 +683,12 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
     def __init__(self, return_recv_hook: bool, **kwargs):
         super().__init__(**kwargs)
 
+        if _is_npu:
+            # NPU graph padding and idle ranks can produce -1 expert IDs. The
+            # low-latency operator must receive x_active_mask or it may use -1
+            # to calculate an out-of-range communication-window address.
+            os.environ.setdefault("MOE_ENABLE_TOPK_NEG_ONE", "1")
+
         """
         num_max_dispatch_tokens_per_rank: the actual batch size in the decoding engine should be less than 256
         https://github.com/deepseek-ai/DeepEP?tab=readme-ov-file#example-use-in-inference-decoding
@@ -669,11 +702,13 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         hidden_states: torch.Tensor,
         topk_output: TopKOutput,
     ):
-        buffer = self._get_buffer()
         topk_weights, topk_ids = topk_output.topk_weights, topk_output.topk_ids
-        topk_ids = topk_ids.to(torch.int64)
+        # The Ascend low-latency operators consume int32 expert IDs. Keeping
+        # them int32 avoids an int64 conversion here followed by `.int()` in
+        # deep_ep for both dispatch and combine.
+        topk_ids = topk_ids.to(torch.int32 if _is_npu else torch.int64)
         expected_m = (
-            hidden_states.shape[0] * buffer.group_size * topk_ids.shape[1]
+            hidden_states.shape[0] * self.group_size * topk_ids.shape[1]
             + self.num_experts
         ) // self.num_experts
         hidden_states, masked_m, event, hook = self._dispatch_core(
@@ -701,7 +736,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         event,
         hook,
     ):
-        hook() if self.return_recv_hook else event.current_stream_wait()
+        hook() if self.return_recv_hook else _wait_deepep_event(event)
 
         get_global_expert_distribution_recorder().on_deepep_dispatch_low_latency(
             masked_m
@@ -746,6 +781,13 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
 
         buffer = self._get_buffer()
         _deepep_precompile_tp_barrier()
+        quant_mode_opts = {}
+        if (
+            _is_npu
+            and self.deepep_output_dtype == DispatcherOutputDtype.INT8
+            and _supports_deepep_quant_mode
+        ):
+            quant_mode_opts["quant_mode"] = "int8"
         packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
             buffer.low_latency_dispatch(
                 hidden_states,
@@ -762,6 +804,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 ),
                 async_finish=not self.return_recv_hook,
                 return_recv_hook=self.return_recv_hook,
+                **quant_mode_opts,
                 **fp8_deepgemm_scale_opts,
             )
         )
@@ -785,7 +828,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         if overlap_args is not None:
             overlap_args.stream.wait_stream(self.device_module.current_stream())
 
-        hook() if self.return_recv_hook else event.current_stream_wait()
+        hook() if self.return_recv_hook else _wait_deepep_event(event)
 
         if overlap_args is not None:
             self.device_module.current_stream().wait_stream(overlap_args.stream)
@@ -902,6 +945,7 @@ class DeepEPDispatcher(BaseDispatcher):
 
         self._stage = _Stage.INITIAL
         self._deepep_dispatch_hooks = DeepEPPDispatchHooks()
+        self._active_impl: Optional[_DeepEPDispatcherImplBase] = None
 
         # DeepEP/Mooncake/Nixl mark invalid topk slots with -1; the AITER
         # pre_permute reroutes them to a sink slot at index num_local_experts,
@@ -922,7 +966,7 @@ class DeepEPDispatcher(BaseDispatcher):
         topk_output: TopKOutput,
     ) -> DispatchOutput:
         self.dispatch_a(hidden_states, topk_output)
-        if self._deepep_dispatch_hooks is not None:
+        if self._deepep_dispatch_hooks.hook_dict:
             self._deepep_dispatch_hooks(self)
         ret = self.dispatch_b()
         return ret
@@ -933,7 +977,9 @@ class DeepEPDispatcher(BaseDispatcher):
         topk_output: TopKOutput,
     ):
         self._update_stage(_Stage.INITIAL, _Stage.AFTER_DISPATCH_A)
-        inner_state = self._get_impl().dispatch_a(
+        impl = self._get_impl()
+        self._active_impl = impl
+        inner_state = impl.dispatch_a(
             hidden_states=hidden_states,
             topk_output=topk_output,
         )
@@ -943,7 +989,7 @@ class DeepEPDispatcher(BaseDispatcher):
         self._update_stage(_Stage.AFTER_DISPATCH_A, _Stage.AFTER_DISPATCH_B)
         inner_state = self._dispatch_intermediate_state
         del self._dispatch_intermediate_state
-        return self._get_impl().dispatch_b(*inner_state)
+        return self._active_impl.dispatch_b(*inner_state)
 
     def combine(
         self,
@@ -959,7 +1005,7 @@ class DeepEPDispatcher(BaseDispatcher):
     ):
         hidden_states, topk_ids, topk_weights = combine_input
         self._update_stage(_Stage.AFTER_DISPATCH_B, _Stage.AFTER_COMBINE_A)
-        inner_state = self._get_impl().combine_a(
+        inner_state = self._active_impl.combine_a(
             hidden_states=hidden_states,
             topk_ids=topk_ids,
             topk_weights=topk_weights,
@@ -970,11 +1016,42 @@ class DeepEPDispatcher(BaseDispatcher):
         self._update_stage(_Stage.AFTER_COMBINE_A, _Stage.INITIAL)
         inner_state = self._combine_intermediate_state
         del self._combine_intermediate_state
-        return self._get_impl().combine_b(*inner_state)
+        impl = self._active_impl
+        self._active_impl = None
+        return impl.combine_b(*inner_state)
 
     def _get_impl(self) -> _DeepEPDispatcherImplBase:
+        source = "global"
         is_extend_in_batch = get_is_extend_in_batch()
-        resolved_deepep_mode = self.deepep_mode.resolve(is_extend_in_batch)
+        forward_context = get_tc_piecewise_forward_context()
+        if forward_context is not None and forward_context.forward_batch is not None:
+            forward_batch = forward_context.forward_batch
+            is_extend_in_batch = (
+                forward_batch.is_extend_in_batch
+                or forward_batch.forward_mode.is_extend()
+            )
+            source = "tc_piecewise_forward_batch"
+        server_args = get_global_server_args()
+        is_dllm = server_args is not None and server_args.dllm_algorithm is not None
+        # Diffusion LLM steps use DLLM_EXTEND for fixed-size token blocks, but
+        # their repeated small-batch workload has decode-like communication.
+        resolved_deepep_mode = (
+            DeepEPMode.LOW_LATENCY
+            if _is_npu and self.deepep_mode.is_auto() and is_dllm
+            else self.deepep_mode.resolve(is_extend_in_batch)
+        )
+        if envs.SGLANG_NPU_DEEPEP_DEBUG_GRAPH_LOG.get():
+            count = getattr(self, "_debug_mode_log_count", 0)
+            if count < 64:
+                logger.warning(
+                    "DeepEP graph debug: stage=%s source=%s is_extend_in_batch=%s resolved_mode=%s configured_mode=%s",
+                    self._stage,
+                    source,
+                    is_extend_in_batch,
+                    resolved_deepep_mode,
+                    self.deepep_mode,
+                )
+                self._debug_mode_log_count = count + 1
         if resolved_deepep_mode == DeepEPMode.NORMAL:
             return self._normal_dispatcher
         elif resolved_deepep_mode == DeepEPMode.LOW_LATENCY:

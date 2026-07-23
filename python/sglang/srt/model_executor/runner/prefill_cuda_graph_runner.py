@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Dict, Optional, Union
 import torch
 import tqdm
 
+from sglang.srt.environ import envs
 from sglang.srt.distributed.parallel_state import graph_capture
 from sglang.srt.layers.dp_attention import (
     DpPaddingMode,
@@ -99,6 +100,7 @@ from sglang.srt.utils import (
     get_bool_env_var,
     is_hip,
     is_npu,
+    log_info_on_rank0,
     require_attn_tp_gather,
     require_gathered_buffer,
     require_mlp_tp_gather,
@@ -183,7 +185,15 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
         )
         self.max_bs = model_runner.req_to_token_pool.size
 
-        self.capture_forward_mode = ForwardMode.EXTEND
+        log_info_on_rank0(
+            logger, f"Capture cuda graph num tokens {self.capture_num_tokens}"
+        )
+
+        self.capture_forward_mode = (
+            ForwardMode.DLLM_EXTEND
+            if model_runner.server_args.dllm_algorithm is not None
+            else ForwardMode.EXTEND
+        )
         self.capture_hidden_mode = CaptureHiddenMode.NULL
         # If returning hidden states is enabled, or if speculative prefill
         # needs aux hidden states (DFLASH), capture the FULL variant up front.
@@ -884,7 +894,9 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                 capture_hidden_mode=self.capture_hidden_mode,
                 num_token_non_padded=self._capture_num_token_non_padded(num_tokens),
                 num_token_non_padded_cpu=num_tokens,
-                global_forward_mode=ForwardMode.EXTEND,
+                global_forward_mode=self.capture_forward_mode,
+                is_extend_in_batch=self.capture_forward_mode.is_extend(),
+                all_extend_in_batch=self.capture_forward_mode.is_extend(),
                 lora_ids=None,
                 return_pooled_hidden_states=self.capture_return_pooled_hidden_states,
             )
@@ -969,6 +981,12 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
 
         bs = forward_batch.batch_size
         self.raw_bs = bs
+        forward_batch.is_extend_in_batch = (
+            forward_batch.is_extend_in_batch or forward_batch.forward_mode.is_extend()
+        )
+        forward_batch.all_extend_in_batch = (
+            forward_batch.all_extend_in_batch or forward_batch.is_extend_in_batch
+        )
 
         self.buffer_registry.fill_from(
             forward_batch,
@@ -1076,6 +1094,11 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             num_token_non_padded=num_token_non_padded,
             num_token_non_padded_cpu=forward_batch.num_token_non_padded_cpu,
             global_forward_mode=pcg_global_forward_mode,
+            is_extend_in_batch=forward_batch.is_extend_in_batch
+            or pcg_forward_mode.is_extend(),
+            all_extend_in_batch=forward_batch.all_extend_in_batch
+            or forward_batch.is_extend_in_batch
+            or pcg_forward_mode.is_extend(),
             lora_ids=forward_batch.lora_ids,
             sampling_info=forward_batch.sampling_info,
             mm_inputs=forward_batch.mm_inputs,
@@ -1145,6 +1168,19 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             static_forward_batch = self.load_batch(forward_batch, **kwargs)
             static_num_tokens = len(static_forward_batch.input_ids)
             raw_num_tokens = self.raw_num_tokens
+            static_forward_batch.dp_local_start_pos = (
+                static_forward_batch.dp_local_num_tokens
+            ) = None
+            set_dp_buffer_len(
+                static_forward_batch.global_dp_buffer_len,
+                self._static_num_tokens,
+                static_forward_batch.dp_padding_mode.is_max_len(),
+                static_forward_batch.global_num_tokens_cpu,
+            )
+            set_is_extend_in_batch(
+                static_forward_batch.is_extend_in_batch
+                or static_forward_batch.forward_mode.is_extend()
+            )
 
             if self.layer_model is not None:
                 # BCG / Full: replay the captured body, run the LM head +
@@ -1257,6 +1293,11 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                     hidden_states=(
                         output.hidden_states[: self.raw_num_tokens]
                         if output.hidden_states is not None
+                        else None
+                    ),
+                    full_logits=(
+                        output.full_logits[: self.raw_num_tokens]
+                        if output.full_logits is not None
                         else None
                     ),
                     input_token_logprobs=output.input_token_logprobs,
