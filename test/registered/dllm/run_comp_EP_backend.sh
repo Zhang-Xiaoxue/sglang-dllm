@@ -4,13 +4,13 @@ set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # Comparison matrix. These are the only settings normally worth editing.
-DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0,5,6,7}
-CSV=${SGLANG_DLLM_EP_CSV:-0723_merge-llada2_deepep_vs_none_full_matrix.csv}
+DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-4,5,6,7}
+CSV=${SGLANG_DLLM_EP_CSV:-0725_merge-llada2_deepep_vs_none_full_matrix_variableGraph.csv}
 MODEL_SIZE=${SGLANG_DLLM_MODEL_SIZE:-mini}
 BS_LIST=${SGLANG_DLLM_EP_BS_LIST:-"1 4 8 16 32 64 128 256"}
 TP_LIST=${SGLANG_DLLM_EP_TP_LIST:-"4 2 1"}
 EP_LIST=${SGLANG_DLLM_EP_SIZE_LIST:-"4 2 1"}
-BACKEND_LIST=${SGLANG_DLLM_EP_BACKEND_LIST:-"deepep none"}
+BACKEND_LIST=${SGLANG_DLLM_EP_BACKEND_LIST:-"deepep"} # NONE
 
 export ASCEND_RT_VISIBLE_DEVICES=${DEVICES}
 

@@ -27,6 +27,7 @@ CSV_COLUMNS = [
     "dp",
     "moe_dp_size",
     "moe_a2a_backend",
+    "deepep_mode",
     "deepep_dispatch_dtype",
     "random_seed",
     "max_running_requests",
@@ -54,10 +55,6 @@ def _env_int(name, default):
 def _env_bool(name, default=False):
     value = _env(name, "1" if default else "0").lower()
     return value in ("1", "true", "yes", "on")
-
-
-def _env_list(name):
-    return _env(name).replace(",", " ").split()
 
 
 def _env_path(name, default):
@@ -120,6 +117,7 @@ class TestLLaDA2(CustomTestCase):
         cls.dp = _env("DP", 1)
         cls.moe_dp_size = _env("MOE_DP_SIZE", 1)
         cls.moe_a2a_backend = _env("MOE_A2A_BACKEND", "none")
+        cls.deepep_mode = _env("DEEPEP_MODE", "")
         cls.deepep_dispatch_dtype = _env("DEEPEP_DISPATCH_DTYPE", "auto")
         cls.random_seed = _env("RANDOM_SEED", 0)
         cls.max_running_requests = _env("MAX_RUNNING_REQUESTS", cls.bs)
@@ -129,15 +127,6 @@ class TestLLaDA2(CustomTestCase):
 
         if cls.moe_a2a_backend == "deepep":
             os.environ.setdefault("HCCL_BUFFSIZE", _env("HCCL_BUFFSIZE", "1024"))
-            capacity = _env("DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK", "")
-            if capacity:
-                os.environ["SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK"] = capacity
-            else:
-                os.environ.setdefault(
-                    "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK",
-                    str(int(cls.max_running_requests) * 32),
-                )
-
         other_args = [
             "--trust-remote-code",
             "--device",
@@ -165,13 +154,8 @@ class TestLLaDA2(CustomTestCase):
         if _env_bool("ENABLE_DP_ATTENTION"):
             other_args.extend(["--enable-dp-attention", "--enable-dp-lm-head"])
         _append_optional_arg(other_args, "--moe-a2a-backend", cls.moe_a2a_backend)
-        decode_graph_bs = _env_list("CUDA_GRAPH_BS_DECODE")
-        if decode_graph_bs:
-            other_args.extend(["--cuda-graph-bs-decode", *decode_graph_bs])
         if cls.moe_a2a_backend == "deepep":
-            _append_optional_arg(
-                other_args, "--deepep-mode", _env("DEEPEP_MODE", "")
-            )
+            _append_optional_arg(other_args, "--deepep-mode", cls.deepep_mode)
             _append_optional_arg(
                 other_args,
                 "--deepep-dispatcher-output-dtype",
@@ -214,6 +198,9 @@ class TestLLaDA2(CustomTestCase):
                 "dp": cls.dp,
                 "moe_dp_size": cls.moe_dp_size,
                 "moe_a2a_backend": cls.moe_a2a_backend,
+                "deepep_mode": (
+                    cls.deepep_mode if cls.moe_a2a_backend == "deepep" else ""
+                ),
                 "deepep_dispatch_dtype": (
                     cls.deepep_dispatch_dtype
                     if cls.moe_a2a_backend == "deepep"
